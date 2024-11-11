@@ -721,6 +721,152 @@ if __name__ == "__main__":
     train(args, model, train_dataloader_kadid, optimizer, lr_scheduler, scaler, device)
 
  """
+""" 
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Dataset
+import numpy as np
+from dotmap import DotMap
+import openpyxl
+import pandas
+from openpyxl.styles import Alignment
+import pickle
+from PIL import Image
+from pathlib import Path
+from typing import List, Tuple, Optional
+from datetime import datetime
+from einops import rearrange
+from sklearn.linear_model import Ridge
+from scipy import stats
+import argparse
+from tqdm import tqdm
+from data import LIVEDataset, CSIQDataset, TID2013Dataset, KADID10KDataset, FLIVEDataset, SPAQDataset
+from utils.utils import PROJECT_ROOT, parse_command_line_args, merge_configs, parse_config
+from models.simclr import SimCLR
+
+synthetic_datasets = ["live", "csiq", "tid2013", "kadid10k"]
+authentic_datasets = ["flive", "SPAQ"]
+
+def save_checkpoint(model: nn.Module, checkpoint_path: Path, epoch: int, srocc: float) -> None:
+    filename = f"epoch_{epoch}_srocc_{srocc:.3f}.pth"
+    torch.save(model.state_dict(), checkpoint_path / filename)
+    print(f"Checkpoint saved: {checkpoint_path / filename}")
+
+def check_data_sampling(data_loader, num_batches=5):
+    for i, (images, labels) in enumerate(data_loader):
+        if i >= num_batches:
+            break
+        print(f"Batch {i+1}")
+        print("Sample paths:", images[:5])
+        print("Sample labels:", labels[:5])
+        print("="*40)
+
+
+def calculate_srcc_plcc(proj_A, proj_B):
+    proj_A = torch.clamp(proj_A, min=-1e3, max=1e3).detach().cpu().numpy()
+    proj_B = torch.clamp(proj_B, min=-1e3, max=1e3).detach().cpu().numpy()
+
+    srocc, _ = stats.spearmanr(proj_A.flatten(), proj_B.flatten())
+    plcc, _ = stats.pearsonr(proj_A.flatten(), proj_B.flatten())
+    return srocc, plcc
+
+def train(args, model, train_dataloader, optimizer, lr_scheduler, scaler, device):
+    checkpoint_path = Path(args.checkpoint_base_path) / "attention_mechanism"
+    checkpoint_path.mkdir(parents=True, exist_ok=True)
+    
+    for epoch in range(args.training.epochs):
+        model.train()
+        running_loss = 0.0
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch [{epoch + 1}/{args.training.epochs}]")
+        
+        for i, batch in enumerate(progress_bar):
+            inputs_A_orig = batch["img_A_orig"].to(device)
+            inputs_A_ds = batch["img_A_ds"].to(device)
+            inputs_A = torch.cat((inputs_A_orig, inputs_A_ds), dim=1).view(-1, 4, 3, 224, 224)
+
+            inputs_B_orig = batch["img_B_orig"].to(device)
+            inputs_B_ds = batch["img_B_ds"].to(device)
+            inputs_B = torch.cat((inputs_B_orig, inputs_B_ds), dim=1).view(-1, 4, 3, 224, 224)
+
+            optimizer.zero_grad()
+            with torch.cuda.amp.autocast():
+                proj_A, proj_B = model(inputs_A, inputs_B)
+                
+                # 값 클램핑 및 NaN 방지 적용
+                proj_A = torch.nan_to_num(proj_A, nan=0.0, posinf=1e3, neginf=-1e3)
+                proj_B = torch.nan_to_num(proj_B, nan=0.0, posinf=1e3, neginf=-1e3)
+
+                # 손실 계산 및 NaN 확인
+                loss = model.compute_loss(proj_A, proj_B)
+                if torch.isnan(loss):
+                    print("NaN loss detected, skipping this batch.")
+                    continue
+
+            scaler.scale(loss).backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)  # 작은 max_norm 적용
+            scaler.step(optimizer)
+            scaler.update()
+
+            running_loss += loss.item()
+            srocc, plcc = calculate_srcc_plcc(proj_A, proj_B)
+            progress_bar.set_postfix(loss=running_loss / (i + 1), SRCC=srocc, PLCC=plcc)
+
+        if epoch % args.checkpoint_frequency == 0:
+            save_checkpoint(model, checkpoint_path, epoch, srocc)
+
+        if epoch > 5:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] *= 0.5
+
+    print("Finished training")
+
+def validate(args: DotMap,
+             model: nn.Module,
+             val_dataloader: DataLoader,
+             device: torch.device) -> Tuple[float, float]:
+    model.eval()
+    
+    srocc_all = []
+    plcc_all = []
+
+    with torch.no_grad():
+        for batch in val_dataloader:
+            inputs_A = batch["img_A_orig"].to(device)
+            inputs_B = batch["img_B_orig"].to(device)
+
+            proj_A, proj_B = model(inputs_A, inputs_B)
+
+            # SRCC 및 PLCC 계산
+            srocc, plcc = calculate_srcc_plcc(proj_A, proj_B)
+            srocc_all.append(srocc)
+            plcc_all.append(plcc)
+
+    # 평균 SRCC 및 PLCC 계산
+    avg_srocc = sum(srocc_all) / len(srocc_all)
+    avg_plcc = sum(plcc_all) / len(plcc_all)
+    
+    print(f"Validation Results - SRCC: {avg_srocc:.4f}, PLCC: {avg_plcc:.4f}")
+    return avg_srocc, avg_plcc
+
+if __name__ == "__main__":
+    args = parse_config('config.yaml')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    train_dataloader = DataLoader(
+        KADID10KDataset(Path(args.data_base_path) / "KADID10K", phase="train"),
+        batch_size=args.training.batch_size,
+        shuffle=True,
+        num_workers=args.training.num_workers
+    )
+
+    model = SimCLR(encoder_params=args.model.encoder, temperature=args.model.temperature).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.training.learning_rate)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.training.step_size, gamma=args.training.gamma)
+    scaler = torch.cuda.amp.GradScaler()
+
+    train(args, model, train_dataloader, optimizer, lr_scheduler, scaler, device)
+ """
+
 
 import torch
 import torch.nn as nn
@@ -762,7 +908,7 @@ def check_data_sampling(data_loader, num_batches=5):
         print("="*40)
 
 
-""" def calculate_srcc_plcc(proj_A, proj_B):
+def calculate_srcc_plcc(proj_A, proj_B):
     proj_A = proj_A.detach().cpu().numpy()
     proj_B = proj_B.detach().cpu().numpy()
     
@@ -773,15 +919,15 @@ def check_data_sampling(data_loader, num_batches=5):
     srocc, _ = stats.spearmanr(proj_A.flatten(), proj_B.flatten())
     plcc, _ = stats.pearsonr(proj_A.flatten(), proj_B.flatten())
     return srocc, plcc
- """
 
-def calculate_srcc_plcc(proj_A, proj_B):
+
+""" def calculate_srcc_plcc(proj_A, proj_B):
     proj_A = torch.clamp(proj_A, min=-1e3, max=1e3).detach().cpu().numpy()
     proj_B = torch.clamp(proj_B, min=-1e3, max=1e3).detach().cpu().numpy()
 
     srocc, _ = stats.spearmanr(proj_A.flatten(), proj_B.flatten())
     plcc, _ = stats.pearsonr(proj_A.flatten(), proj_B.flatten())
-    return srocc, plcc
+    return srocc, plcc """
 
 """ def train(args: DotMap,
           model: nn.Module,
