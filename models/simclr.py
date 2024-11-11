@@ -161,7 +161,7 @@ if __name__ == "__main__":
     print(f"proj_A shape: {proj_A.shape}, proj_B shape: {proj_B.shape}")
  """
 
-import torch
+""" import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dotmap import DotMap
@@ -266,7 +266,7 @@ class SimCLR(nn.Module):
             f"proj_q and proj_p shapes must match, got {proj_q.shape} and {proj_p.shape}"
         return self.nt_xent_loss(proj_q, proj_p)
 
-    def nt_xent_loss(self, a: torch.Tensor, b: torch.Tensor, tau: float = 0.5) -> torch.Tensor:
+    def nt_xent_loss(self, a: torch.Tensor, b: torch.Tensor, tau: float = 0.1) -> torch.Tensor:
         # NT-Xent (Normalized temperature-scaled cross-entropy) loss 계산
         a_norm = torch.norm(a, dim=1, keepdim=True) + 1e-8  # 작은 값 추가
         a_cap = a / a_norm
@@ -286,7 +286,6 @@ class SimCLR(nn.Module):
 
 
 def calculate_srcc_plcc(proj_A, proj_B):
-    """SRCC와 PLCC 계산 및 결과 출력"""
     proj_A_np = proj_A.detach().cpu().numpy().flatten()
     proj_B_np = proj_B.detach().cpu().numpy().flatten()
     srocc, _ = stats.spearmanr(proj_A_np, proj_B_np)
@@ -318,3 +317,65 @@ if __name__ == "__main__":
 
     # 출력 차원 확인
     print(f"proj_A shape: {proj_A.shape}, proj_B shape: {proj_B.shape}")
+
+ """
+## 수정
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from dotmap import DotMap
+from scipy import stats
+from models.resnet import ResNet
+from models.attention_module import DistortionAttention, HardNegativeCrossAttention
+from torch.nn import TripletMarginLoss
+
+class ModifiedSimCLR(nn.Module):
+    def __init__(self, encoder_params: DotMap, temperature: float = 0.1, margin: float = 1.0):
+        super(ModifiedSimCLR, self).__init__()
+
+        # ResNet Encoder와 projection layer
+        self.encoder = ResNet(
+            embedding_dim=encoder_params.embedding_dim,
+            pretrained=encoder_params.pretrained,
+            use_norm=encoder_params.use_norm
+        )
+        
+        # projector의 첫 번째 Linear 레이어 입력 크기를 2048로 설정
+        self.projector = nn.Sequential(
+            nn.Linear(2048, 1024),
+            nn.ReLU(),
+            nn.Linear(1024, encoder_params.embedding_dim)
+        )
+
+        self.self_attention = DistortionAttention(embed_dim=encoder_params.embedding_dim, num_heads=4)
+        self.cross_attention = HardNegativeCrossAttention(embed_dim=encoder_params.embedding_dim, num_heads=4)
+        self.temperature = temperature
+        self.triplet_loss = TripletMarginLoss(margin=margin)
+
+        # 초기화 방법 설정 (xavier 초기화)
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        # Sequential 내부의 Linear 레이어 각각 초기화
+        for layer in self.projector:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
+
+    def forward(self, img_anchor, img_positive, img_negative):
+        # Encoder 통과 후 projector를 거쳐 attention 적용
+        anchor_features = self.encoder(img_anchor)[0]
+        positive_features = self.encoder(img_positive)[0]
+        negative_features = self.encoder(img_negative)[0]
+
+        anchor_proj = self.self_attention(self.projector(anchor_features))
+        positive_proj = self.self_attention(self.projector(positive_features))
+        negative_proj = self.self_attention(self.projector(negative_features))
+
+        return anchor_proj, positive_proj, negative_proj
+
+    def compute_loss(self, anchor, positive, negative):
+        return self.triplet_loss(anchor, positive, negative)
+

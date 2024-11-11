@@ -206,7 +206,9 @@ class TID2013Dataset(Dataset):
             "mos": mos
         }
  """
-import os
+
+#이게원본
+""" import os
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
@@ -250,7 +252,6 @@ class TID2013Dataset(Dataset):
         return len(self.images)
 
     def load_image(self, path: str) -> torch.Tensor:
-        """이미지를 로드하고 필요시 변환합니다."""
         try:
             image = Image.open(path).convert("RGB")
         except Exception as e:
@@ -277,5 +278,75 @@ class TID2013Dataset(Dataset):
             "img_A_ds": img_A_ds,
             "img_B_orig": img_B_orig,  # img_B_orig 반환 추가
             "img_B_ds": img_B_ds,
+            "mos": mos
+        }
+ """
+
+import os
+import pandas as pd
+import torch
+from torch.utils.data import Dataset
+from torchvision import transforms
+from PIL import Image
+
+class TID2013Dataset(Dataset):
+    def __init__(self, root: str, phase: str = "train", crop_size: int = 224, transform=None):
+        self.root = root
+        self.phase = phase
+        self.crop_size = crop_size
+        self.transform = transform if transform else transforms.Compose([
+            transforms.Resize((crop_size, crop_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])  # 정규화 추가
+        ])
+
+        # Load scores from CSV
+        scores_csv = pd.read_csv(os.path.join(root, "mos.csv"))
+        self.images = scores_csv["image_id"].values
+        self.mos = scores_csv["mean"].values
+
+        # Construct image paths
+        self.image_paths = [os.path.join(root, "distorted_images", img) for img in self.images]
+        self.reference_paths = [os.path.join(root, "reference_images", img.split("_")[0] + ".BMP") for img in self.images]
+
+        # 출력 추가
+        print(f"Loaded {len(self.images)} images.")
+        print("Image paths:", self.image_paths[:5])  # 처음 5개 이미지 경로 출력
+        print("Reference paths:", self.reference_paths[:5])  # 처음 5개 참조 이미지 경로 출력
+        print("MOS values:", self.mos[:5])  # 처음 5개 MOS 값 출력
+
+    def __len__(self):
+        return len(self.images)
+
+    def load_image(self, path: str) -> torch.Tensor:
+        """이미지를 로드하고 필요시 변환합니다."""
+        try:
+            image = Image.open(path).convert("RGB")
+        except Exception as e:
+            print(f"Error loading image {path}: {e}")
+            return None  # 로딩 실패 시 None 반환
+        if self.transform:
+            image = self.transform(image)
+        return image  # [3, H, W] 형식 유지
+
+    def __getitem__(self, index: int) -> dict:
+        # Anchor 이미지로 distorted image 사용
+        img_anchor = self.load_image(self.image_paths[index])
+        img_positive = self.load_image(self.reference_paths[index])
+        
+        # Negative 이미지는 다른 index의 reference image에서 선택
+        negative_index = (index + 1) % len(self.reference_paths)
+        img_negative = self.load_image(self.reference_paths[negative_index])
+        mos = torch.tensor(self.mos[index], dtype=torch.float32)
+
+        # Null 체크
+        if img_anchor is None or img_positive is None or img_negative is None:
+            print(f"Warning: Missing data for index {index}, skipping this sample.")
+            return {}
+
+        return {
+            "img_anchor": img_anchor,
+            "img_positive": img_positive,
+            "img_negative": img_negative,
             "mos": mos
         }

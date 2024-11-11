@@ -205,3 +205,4 @@ class HardNegativeCrossAttention(nn.Module):
             attn_output = self.dropout(attn_output)
             attn_output = self.norm(attn_output)  # Layer normalization - 출력에 적용
         return attn_output
+

@@ -1,4 +1,4 @@
-import torch
+""" import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 import numpy as np
@@ -235,4 +235,85 @@ if __name__ == "__main__":
     model.to(device)
     model.eval()
 
+    test(args, model, device)
+ """
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+import numpy as np
+from dotmap import DotMap
+from pathlib import Path
+from scipy import stats
+from tqdm import tqdm
+from data import TID2013Dataset, KADID10KDataset
+from utils.utils import parse_config
+from models.simclr import ModifiedSimCLR
+
+# SRCC와 PLCC 계산 함수
+def calculate_srcc_plcc(proj_A, proj_B):
+    proj_A = proj_A.detach().cpu().numpy()
+    proj_B = proj_B.detach().cpu().numpy()
+    srocc, _ = stats.spearmanr(proj_A.flatten(), proj_B.flatten())
+    plcc, _ = stats.pearsonr(proj_A.flatten(), proj_B.flatten())
+    return srocc, plcc
+
+# 테스트 함수
+def test(args: DotMap, model: nn.Module, device: torch.device) -> None:
+    model.eval()
+    
+    # 평가를 위한 데이터셋 로드
+    datasets = {
+        "tid2013": TID2013Dataset(Path(args.data_base_path) / "TID2013", phase="all"),
+        "kadid10k": KADID10KDataset(Path(args.data_base_path) / "KADID10K", phase="all")
+    }
+
+    srocc_all = {}
+    plcc_all = {}
+
+    for dataset_name, dataset in datasets.items():
+        dataloader = DataLoader(dataset, batch_size=args.test.batch_size, shuffle=False, num_workers=args.test.num_workers)
+        
+        srocc_list = []
+        plcc_list = []
+
+        with torch.no_grad():
+            for batch in tqdm(dataloader, desc=f"Testing {dataset_name}"):
+                img_A = batch["img_A"].to(device)
+                img_B = batch["img_B"].to(device)
+
+                # 모델의 attention projection을 통한 특징 추출
+                proj_A, proj_B, _ = model(img_A, img_B, img_B)
+
+                # SRCC와 PLCC 계산
+                srocc, plcc = calculate_srcc_plcc(proj_A, proj_B)
+                srocc_list.append(srocc)
+                plcc_list.append(plcc)
+
+        # 각 데이터셋에 대해 median 계산
+        srocc_all[dataset_name] = np.median(srocc_list)
+        plcc_all[dataset_name] = np.median(plcc_list)
+
+        print(f"{dataset_name} - SRCC: {srocc_all[dataset_name]:.4f}, PLCC: {plcc_all[dataset_name]:.4f}")
+
+    # 최종 평균 계산
+    srocc_avg = np.nanmean(list(srocc_all.values()))
+    plcc_avg = np.nanmean(list(plcc_all.values()))
+
+    print(f"Global Average - SRCC: {srocc_avg:.4f}, PLCC: {plcc_avg:.4f}")
+
+if __name__ == "__main__":
+    args = parse_config('config.yaml')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 모델 로드
+    model = ModifiedSimCLR(encoder_params=args.model.encoder, temperature=args.model.temperature, margin=1.0).to(device)
+
+    # 체크포인트 로드
+    # 정확한 체크포인트 경로 설정
+    checkpoint_path = Path("E:/ARNIQA - Enhanced-Hard-Negative-Attention/ARNIQA/checkpoints/attention_mechanism/attention_mechanism/epoch_7_srocc_0.931.pth")
+
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device), strict=True)
+    model.eval()
+
+    # 테스트 실행
     test(args, model, device)
