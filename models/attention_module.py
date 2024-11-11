@@ -95,10 +95,12 @@ class DistortionAttention(nn.Module):
     def forward(self, features):
         attn_output = features
         for layer in self.layers:
+            attn_output = self.norm(attn_output)  # Layer normalization - 입력에 적용
             attn_output, _ = layer(attn_output, attn_output, attn_output)
             attn_output = self.dropout(attn_output)
-            attn_output = self.norm(attn_output)  # Layer normalization 적용
+            attn_output = self.norm(attn_output)  # Layer normalization - 출력에 적용
         return attn_output
+
 
 
 class HardNegativeCrossAttention(nn.Module):
