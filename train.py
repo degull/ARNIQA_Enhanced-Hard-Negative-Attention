@@ -1151,6 +1151,8 @@ if __name__ == "__main__":
 # ------------------------------------------------------------------------------------------------------------------------------------------#
 
 # kadid
+
+"""
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -1160,7 +1162,7 @@ from pathlib import Path
 from tqdm import tqdm
 from data import KADID10KDataset
 from utils.utils import parse_config
-from models.simclr import ModifiedSimCLR
+from models.simclr import SimCLR
 from scipy import stats
 from typing import List, Tuple, Optional
 
@@ -1251,7 +1253,7 @@ if __name__ == "__main__":
         num_workers=args.training.num_workers
     )
 
-    model = ModifiedSimCLR(encoder_params=args.model.encoder, temperature=args.model.temperature, margin=1.0).to(device)
+    model = SimCLR(encoder_params=args.model.encoder, temperature=args.model.temperature, margin=1.0).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.training.learning_rate)
 
     # StepLR 스케줄러 설정 (10 에포크마다 학습률을 0.1로 감소)
@@ -1259,10 +1261,11 @@ if __name__ == "__main__":
     scaler = torch.cuda.amp.GradScaler()
 
     train(args, model, train_dataloader, optimizer, lr_scheduler, scaler, device)
+ """
+# PLCC=0.883, SRCC=0.888, loss=1.05
 
-
-# tid2013
-import torch
+# TID
+""" import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import numpy as np
@@ -1271,7 +1274,7 @@ from pathlib import Path
 from tqdm import tqdm
 from data import TID2013Dataset  # Import the TID2013Dataset
 from utils.utils import parse_config
-from models.simclr import ModifiedSimCLR
+from models.simclr import SimCLR
 from scipy import stats
 from typing import List, Tuple, Optional
 
@@ -1359,10 +1362,385 @@ if __name__ == "__main__":
         num_workers=args.training.num_workers
     )
 
-    model = ModifiedSimCLR(encoder_params=args.model.encoder, temperature=args.model.temperature, margin=1.0).to(device)
+    model = SimCLR(encoder_params=args.model.encoder, temperature=args.model.temperature, margin=1.0).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.training.learning_rate)
 
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.training.step_size, gamma=args.training.gamma)
     scaler = torch.cuda.amp.GradScaler()
 
     train(args, model, train_dataloader, optimizer, lr_scheduler, scaler, device)
+
+
+# KADID
+
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+import numpy as np
+from dotmap import DotMap
+from pathlib import Path
+from tqdm import tqdm
+from data import KADID10KDataset 
+from utils.utils import parse_config
+from models.simclr import SimCLR
+from scipy import stats
+from typing import List, Tuple, Optional
+
+# 모델 체크포인트 저장 함수
+def save_checkpoint(model: nn.Module, checkpoint_path: Path, epoch: int, srocc: float) -> None:
+    filename = f"epoch_{epoch}_srocc_{srocc:.3f}.pth"
+    torch.save(model.state_dict(), checkpoint_path / filename)
+    print(f"Checkpoint saved: {checkpoint_path / filename}")
+
+# SRCC와 PLCC 계산 함수
+def calculate_srcc_plcc(proj_A, proj_B):
+    proj_A = proj_A.detach().cpu().numpy()
+    proj_B = proj_B.detach().cpu().numpy()
+    srocc, _ = stats.spearmanr(proj_A.flatten(), proj_B.flatten())
+    plcc, _ = stats.pearsonr(proj_A.flatten(), proj_B.flatten())
+    return srocc, plcc
+
+# 학습 함수
+def train(args, model, train_dataloader, optimizer, lr_scheduler, scaler, device):
+    checkpoint_path = Path(args.checkpoint_base_path) / "am_tid"
+    checkpoint_path.mkdir(parents=True, exist_ok=True)
+    
+    for epoch in range(args.training.epochs):
+        model.train()
+        running_loss = 0.0
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch [{epoch + 1}/{args.training.epochs}]")
+        
+        for i, batch in enumerate(progress_bar):
+            inputs_anchor = batch["img_anchor"].to(device)
+            inputs_positive = batch["img_positive"].to(device)
+            inputs_negative = batch["img_negative"].to(device)
+
+            optimizer.zero_grad()
+            with torch.cuda.amp.autocast():
+                proj_anchor, proj_positive, proj_negative = model(inputs_anchor, inputs_positive, inputs_negative)
+                loss = model.compute_loss(proj_anchor, proj_positive, proj_negative)  # Triplet loss 사용
+
+            scaler.scale(loss).backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+            scaler.step(optimizer)
+            scaler.update()
+
+            running_loss += loss.item()
+            srocc, plcc = calculate_srcc_plcc(proj_anchor, proj_positive)
+            progress_bar.set_postfix(loss=running_loss / (i + 1), SRCC=srocc, PLCC=plcc)
+
+        lr_scheduler.step()
+        if epoch % args.checkpoint_frequency == 0:
+            save_checkpoint(model, checkpoint_path, epoch, srocc)
+
+    print("Finished training")
+
+# 검증 함수
+def validate(args: DotMap, model: nn.Module, val_dataloader: DataLoader, device: torch.device) -> Tuple[float, float]:
+    model.eval()
+    srocc_all = []
+    plcc_all = []
+
+    with torch.no_grad():
+        for batch in val_dataloader:
+            inputs_anchor = batch["img_anchor"].to(device)
+            inputs_positive = batch["img_positive"].to(device)
+            inputs_negative = batch["img_negative"].to(device)
+
+            proj_anchor, proj_positive, _ = model(inputs_anchor, inputs_positive, inputs_negative)
+            srocc, plcc = calculate_srcc_plcc(proj_anchor, proj_positive)
+            srocc_all.append(srocc)
+            plcc_all.append(plcc)
+
+    avg_srocc = sum(srocc_all) / len(srocc_all)
+    avg_plcc = sum(plcc_all) / len(plcc_all)
+    
+    print(f"Validation Results - SRCC: {avg_srocc:.4f}, PLCC: {avg_plcc:.4f}")
+    return avg_srocc, avg_plcc
+
+# 메인 실행
+if __name__ == "__main__":
+    args = parse_config('config.yaml')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    train_dataloader = DataLoader(
+        TID2013Dataset(Path(args.data_base_path) / "KADID10K", phase="train"),
+        batch_size=args.training.batch_size,
+        shuffle=True,
+        num_workers=args.training.num_workers
+    )
+
+    model = SimCLR(encoder_params=args.model.encoder, temperature=args.model.temperature, margin=1.0).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.training.learning_rate)
+
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.training.step_size, gamma=args.training.gamma)
+    scaler = torch.cuda.amp.GradScaler()
+
+    train(args, model, train_dataloader, optimizer, lr_scheduler, scaler, device)
+ """
+
+# KADID2
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+import numpy as np
+from dotmap import DotMap
+from pathlib import Path
+from tqdm import tqdm
+from scipy import stats
+from torch.utils.data import random_split
+from data import KADID10KDataset
+from utils.utils import parse_config
+from models.simclr import SimCLR
+from typing import Tuple
+
+# 모델 체크포인트 저장 함수
+def save_checkpoint(model: nn.Module, checkpoint_path: Path, epoch: int, srocc: float) -> None:
+    filename = f"epoch_{epoch}_srocc_{srocc:.3f}.pth"
+    torch.save(model.state_dict(), checkpoint_path / filename)
+    print(f"Checkpoint saved: {checkpoint_path / filename}")
+
+# SRCC와 PLCC 계산 함수
+def calculate_srcc_plcc(proj_A, proj_B):
+    proj_A = proj_A.detach().cpu().numpy()
+    proj_B = proj_B.detach().cpu().numpy()
+    srocc, _ = stats.spearmanr(proj_A.flatten(), proj_B.flatten())
+    plcc, _ = stats.pearsonr(proj_A.flatten(), proj_B.flatten())
+    return srocc, plcc
+
+# 데이터셋 분할 함수
+def get_split_indices(dataset, train_ratio=0.7, val_ratio=0.2, test_ratio=0.1):
+    dataset_size = len(dataset)
+    train_size = int(train_ratio * dataset_size)
+    val_size = int(val_ratio * dataset_size)
+    test_size = dataset_size - train_size - val_size
+    return train_size, val_size, test_size
+
+# 학습 함수
+def train(args, model, train_dataloader, val_dataloader, optimizer, lr_scheduler, scaler, device):
+    checkpoint_path = Path(args.checkpoint_base_path) / "am_tid"
+    checkpoint_path.mkdir(parents=True, exist_ok=True)
+    
+    best_srocc, best_plcc = 0, 0  # 최종 SRCC와 PLCC 결과를 저장할 변수 초기화
+
+    for epoch in range(args.training.epochs):
+        model.train()
+        running_loss = 0.0
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch [{epoch + 1}/{args.training.epochs}]")
+        
+        for i, batch in enumerate(progress_bar):
+            inputs_anchor = batch["img_anchor"].to(device)
+            inputs_positive = batch["img_positive"].to(device)
+            inputs_negative = batch["img_negative"].to(device)
+
+            optimizer.zero_grad()
+            with torch.cuda.amp.autocast():
+                proj_anchor, proj_positive, proj_negative = model(inputs_anchor, inputs_positive, inputs_negative)
+                loss = model.compute_loss(proj_anchor, proj_positive, proj_negative)
+
+            scaler.scale(loss).backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+            scaler.step(optimizer)
+            scaler.update()
+
+            running_loss += loss.item()
+            srocc, plcc = calculate_srcc_plcc(proj_anchor, proj_positive)
+            progress_bar.set_postfix(loss=running_loss / (i + 1), SRCC=srocc, PLCC=plcc)
+
+        lr_scheduler.step()
+        
+        # 매 에포크마다 검증 수행
+        if epoch % args.validation.frequency == 0:
+            avg_srocc, avg_plcc = validate(args, model, val_dataloader, device)
+            print(f"Validation - Epoch {epoch + 1}: SRCC = {avg_srocc:.4f}, PLCC = {avg_plcc:.4f}")
+            
+            # 가장 높은 SRCC와 PLCC 결과 업데이트
+            best_srocc = max(best_srocc, avg_srocc)
+            best_plcc = max(best_plcc, avg_plcc)
+
+        if epoch % args.checkpoint_frequency == 0:
+            save_checkpoint(model, checkpoint_path, epoch, avg_srocc)
+
+    # 학습이 완료된 후 최종 SRCC와 PLCC 결과 출력
+    print(f"Training Finished - Best SRCC: {best_srocc:.4f}, Best PLCC: {best_plcc:.4f}")
+
+
+# 검증 함수
+def validate(args: DotMap, model: nn.Module, val_dataloader: DataLoader, device: torch.device) -> Tuple[float, float]:
+    model.eval()
+    srocc_all = []
+    plcc_all = []
+
+    with torch.no_grad():
+        for batch in val_dataloader:
+            inputs_anchor = batch["img_anchor"].to(device)
+            inputs_positive = batch["img_positive"].to(device)
+            inputs_negative = batch["img_negative"].to(device)
+
+            proj_anchor, proj_positive, _ = model(inputs_anchor, inputs_positive, inputs_negative)
+            srocc, plcc = calculate_srcc_plcc(proj_anchor, proj_positive)
+            srocc_all.append(srocc)
+            plcc_all.append(plcc)
+
+    avg_srocc = sum(srocc_all) / len(srocc_all)
+    avg_plcc = sum(plcc_all) / len(plcc_all)
+    
+    print(f"Validation Results - SRCC: {avg_srocc:.4f}, PLCC: {avg_plcc:.4f}")
+    return avg_srocc, avg_plcc
+
+if __name__ == "__main__":
+    args = parse_config('config.yaml')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 전체 데이터셋 로드 및 70% 학습, 20% 검증, 10% 테스트 분할
+    full_dataset = KADID10KDataset(Path(args.data_base_path) / "KADID10K", phase="all")
+    train_size, val_size, test_size = get_split_indices(full_dataset)
+    train_dataset, val_dataset, test_dataset = random_split(full_dataset, [train_size, val_size, test_size])
+
+    # DataLoader 정의
+    train_dataloader = DataLoader(train_dataset, batch_size=args.training.batch_size, shuffle=True, num_workers=args.training.num_workers)
+    val_dataloader = DataLoader(val_dataset, batch_size=args.training.batch_size, shuffle=False, num_workers=args.training.num_workers)
+    test_dataloader = DataLoader(test_dataset, batch_size=args.training.batch_size, shuffle=False, num_workers=args.training.num_workers)
+
+    # 모델, 옵티마이저, 스케줄러, 스케일러 정의
+    model = SimCLR(encoder_params=args.model.encoder, temperature=args.model.temperature, margin=1.0).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.training.learning_rate)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.training.step_size, gamma=args.training.gamma)
+    scaler = torch.cuda.amp.GradScaler()
+
+    # 학습 함수 호출
+    train(args, model, train_dataloader, val_dataloader, optimizer, lr_scheduler, scaler, device)
+
+
+
+# TID2013
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+import numpy as np
+from dotmap import DotMap
+from pathlib import Path
+from tqdm import tqdm
+from scipy import stats
+from torch.utils.data import random_split
+from data import TID2013Dataset
+from utils.utils import parse_config
+from models.simclr import SimCLR
+from typing import Tuple
+
+# 모델 체크포인트 저장 함수
+def save_checkpoint(model: nn.Module, checkpoint_path: Path, epoch: int, srocc: float) -> None:
+    filename = f"epoch_{epoch}_srocc_{srocc:.3f}.pth"
+    torch.save(model.state_dict(), checkpoint_path / filename)
+    print(f"Checkpoint saved: {checkpoint_path / filename}")
+
+# SRCC와 PLCC 계산 함수
+def calculate_srcc_plcc(proj_A, proj_B):
+    proj_A = proj_A.detach().cpu().numpy()
+    proj_B = proj_B.detach().cpu().numpy()
+    srocc, _ = stats.spearmanr(proj_A.flatten(), proj_B.flatten())
+    plcc, _ = stats.pearsonr(proj_A.flatten(), proj_B.flatten())
+    return srocc, plcc
+
+# 데이터셋 분할 함수
+def get_split_indices(dataset, train_ratio=0.7, val_ratio=0.2, test_ratio=0.1):
+    dataset_size = len(dataset)
+    train_size = int(train_ratio * dataset_size)
+    val_size = int(val_ratio * dataset_size)
+    test_size = dataset_size - train_size - val_size
+    return train_size, val_size, test_size
+
+# 학습 함수
+def train(args, model, train_dataloader, val_dataloader, optimizer, lr_scheduler, scaler, device):
+    checkpoint_path = Path(args.checkpoint_base_path) / "am_tid"
+    checkpoint_path.mkdir(parents=True, exist_ok=True)
+    
+    best_srocc, best_plcc = 0, 0  # 최종 SRCC와 PLCC 결과를 저장할 변수 초기화
+
+    for epoch in range(args.training.epochs):
+        model.train()
+        running_loss = 0.0
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch [{epoch + 1}/{args.training.epochs}]")
+        
+        for i, batch in enumerate(progress_bar):
+            inputs_anchor = batch["img_anchor"].to(device)
+            inputs_positive = batch["img_positive"].to(device)
+            inputs_negative = batch["img_negative"].to(device)
+
+            optimizer.zero_grad()
+            with torch.cuda.amp.autocast():
+                proj_anchor, proj_positive, proj_negative = model(inputs_anchor, inputs_positive, inputs_negative)
+                loss = model.compute_loss(proj_anchor, proj_positive, proj_negative)
+
+            scaler.scale(loss).backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+            scaler.step(optimizer)
+            scaler.update()
+
+            running_loss += loss.item()
+            srocc, plcc = calculate_srcc_plcc(proj_anchor, proj_positive)
+            progress_bar.set_postfix(loss=running_loss / (i + 1), SRCC=srocc, PLCC=plcc)
+
+        lr_scheduler.step()
+        
+        # 매 에포크마다 검증 수행
+        if epoch % args.validation.frequency == 0:
+            avg_srocc, avg_plcc = validate(args, model, val_dataloader, device)
+            print(f"Validation - Epoch {epoch + 1}: SRCC = {avg_srocc:.4f}, PLCC = {avg_plcc:.4f}")
+            
+            # 가장 높은 SRCC와 PLCC 결과 업데이트
+            best_srocc = max(best_srocc, avg_srocc)
+            best_plcc = max(best_plcc, avg_plcc)
+
+        if epoch % args.checkpoint_frequency == 0:
+            save_checkpoint(model, checkpoint_path, epoch, avg_srocc)
+
+    # 학습이 완료된 후 최종 SRCC와 PLCC 결과 출력
+    print(f"Training Finished - Best SRCC: {best_srocc:.4f}, Best PLCC: {best_plcc:.4f}")
+
+
+# 검증 함수
+def validate(args: DotMap, model: nn.Module, val_dataloader: DataLoader, device: torch.device) -> Tuple[float, float]:
+    model.eval()
+    srocc_all = []
+    plcc_all = []
+
+    with torch.no_grad():
+        for batch in val_dataloader:
+            inputs_anchor = batch["img_anchor"].to(device)
+            inputs_positive = batch["img_positive"].to(device)
+            inputs_negative = batch["img_negative"].to(device)
+
+            proj_anchor, proj_positive, _ = model(inputs_anchor, inputs_positive, inputs_negative)
+            srocc, plcc = calculate_srcc_plcc(proj_anchor, proj_positive)
+            srocc_all.append(srocc)
+            plcc_all.append(plcc)
+
+    avg_srocc = sum(srocc_all) / len(srocc_all)
+    avg_plcc = sum(plcc_all) / len(plcc_all)
+    
+    print(f"Validation Results - SRCC: {avg_srocc:.4f}, PLCC: {avg_plcc:.4f}")
+    return avg_srocc, avg_plcc
+
+if __name__ == "__main__":
+    args = parse_config('config.yaml')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 전체 데이터셋 로드 및 70% 학습, 20% 검증, 10% 테스트 분할
+    full_dataset = TID2013Dataset(Path(args.data_base_path) / "TID2013", phase="all")
+    train_size, val_size, test_size = get_split_indices(full_dataset)
+    train_dataset, val_dataset, test_dataset = random_split(full_dataset, [train_size, val_size, test_size])
+
+    # DataLoader 정의
+    train_dataloader = DataLoader(train_dataset, batch_size=args.training.batch_size, shuffle=True, num_workers=args.training.num_workers)
+    val_dataloader = DataLoader(val_dataset, batch_size=args.training.batch_size, shuffle=False, num_workers=args.training.num_workers)
+    test_dataloader = DataLoader(test_dataset, batch_size=args.training.batch_size, shuffle=False, num_workers=args.training.num_workers)
+
+    # 모델, 옵티마이저, 스케줄러, 스케일러 정의
+    model = SimCLR(encoder_params=args.model.encoder, temperature=args.model.temperature, margin=1.0).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.training.learning_rate)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.training.step_size, gamma=args.training.gamma)
+    scaler = torch.cuda.amp.GradScaler()
+
+    # 학습 함수 호출
+    train(args, model, train_dataloader, val_dataloader, optimizer, lr_scheduler, scaler, device)
