@@ -209,7 +209,7 @@ class HardNegativeCrossAttention(nn.Module):
  """
 
 # Positional Encoding과 Conv/2 + ReLU 추가
-import torch
+""" import torch
 import torch.nn as nn
 import torch.nn.init as init
 import math
@@ -306,5 +306,83 @@ class HardNegativeCrossAttention(nn.Module):
             # Output에 Layer Normalization 추가
             attn_output = self.norm(attn_output)
         
-        return attn_output
+        return attn_output """
 
+
+## 개선
+import torch
+import torch.nn as nn
+import torch.nn.init as init
+
+class DistortionAttention(nn.Module):
+    def __init__(self, embed_dim, num_heads=8, dropout=0.1, num_layers=2):
+        super(DistortionAttention, self).__init__()
+        self.layers = nn.ModuleList([
+            nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, dropout=dropout)
+            for _ in range(num_layers)
+        ])
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(embed_dim)
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for layer in self.layers:
+            for name, param in layer.named_parameters():
+                if 'weight' in name:
+                    init.xavier_uniform_(param)
+                elif 'bias' in name:
+                    param.data.fill_(0)
+
+    def forward(self, features):
+        attn_output = features
+        for layer in self.layers:
+            attn_output, _ = layer(self.norm(attn_output), self.norm(attn_output), self.norm(attn_output))
+            attn_output = self.dropout(attn_output)
+        return self.norm(attn_output)
+
+class HardNegativeCrossAttention(nn.Module):
+    def __init__(self, embed_dim, num_heads=8, dropout=0.1, num_layers=2):
+        super(HardNegativeCrossAttention, self).__init__()
+        self.positional_encodings = nn.ParameterList([
+            nn.Parameter(torch.randn(1, embed_dim), requires_grad=True) for _ in range(num_layers)
+        ])
+        self.conv1 = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, stride=2, padding=1)
+        self.conv2 = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, stride=2, padding=1)
+        self.relu = nn.ReLU()
+        self.layers = nn.ModuleList([
+            nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, dropout=dropout)
+            for _ in range(num_layers)
+        ])
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(embed_dim)
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for layer in self.layers:
+            for name, param in layer.named_parameters():
+                if 'weight' in name:
+                    init.xavier_uniform_(param)
+                elif 'bias' in name:
+                    param.data.fill_(0)
+
+    def forward(self, high_res_features, low_res_features):
+        high_res_features = high_res_features.unsqueeze(-1).unsqueeze(-1)
+        low_res_features = low_res_features.unsqueeze(-1).unsqueeze(-1)
+
+        high_res_features = self.conv1(high_res_features)
+        high_res_features = self.relu(high_res_features)
+        low_res_features = self.conv2(low_res_features)
+        low_res_features = self.relu(low_res_features)
+
+        high_res_features = high_res_features.squeeze(-1).squeeze(-1)
+        low_res_features = low_res_features.squeeze(-1).squeeze(-1)
+
+        attn_output = high_res_features
+        for i, layer in enumerate(self.layers):
+            high_res_features += self.positional_encodings[i]
+            low_res_features += self.positional_encodings[i]
+            
+            attn_output = self.norm(attn_output)
+            attn_output, _ = layer(attn_output, low_res_features, low_res_features)
+            attn_output = self.dropout(attn_output)
+        return self.norm(attn_output)

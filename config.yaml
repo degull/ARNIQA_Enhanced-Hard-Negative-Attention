@@ -82,7 +82,9 @@ test:
 # Model
 model:
   temperature: 0.1    # NT-Xent 손실 함수에 사용할 온도 값
+  margin: 1.0
   encoder:    # 인코더 파라미터
+    arch: "resnet50"
     embedding_dim: 128    # 임베딩 차원 수
     pretrained: true    # ImageNet 사전 학습 가중치를 사용할지 여부
     use_norm: true    # 임베딩을 정규화할지 여부

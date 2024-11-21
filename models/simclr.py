@@ -382,7 +382,7 @@ class ModifiedSimCLR(nn.Module):  # 여기에서 ModifiedSimCLR 이름을 SimCLR
 
 
 # 수정
-import torch
+""" import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dotmap import DotMap
@@ -438,3 +438,70 @@ class SimCLR(nn.Module):  # ModifiedSimCLR 이름을 SimCLR로 변경
 
     def compute_loss(self, anchor, positive, negative):
         return self.triplet_loss(anchor, positive, negative)
+ """
+
+## 개선
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from dotmap import DotMap
+from models.resnet import ResNet
+from models.attention_module import DistortionAttention, HardNegativeCrossAttention
+from torch.nn import TripletMarginLoss
+
+class SimCLR(nn.Module):
+    def __init__(self, encoder_params=None, temperature=0.5, margin=1.0):
+        super(SimCLR, self).__init__()
+        
+        # encoder_params가 None일 경우 기본 설정 적용
+        if encoder_params is None:
+            encoder_params = {"arch": "resnet50", "pretrained": True}
+        
+        self.encoder_params = encoder_params
+        self.temperature = temperature
+        self.margin = margin
+
+        # 인코더 초기화
+        self.encoder = self._initialize_encoder(encoder_params)
+        
+        # 프로젝션 헤드 정의
+        self.projector = nn.Sequential(
+            nn.Linear(2048, 512),
+            nn.ReLU(),
+            nn.Linear(512, 128)
+        )
+    
+    def _initialize_encoder(self, encoder_params):
+        # 인코더 초기화
+        if "arch" not in encoder_params:
+            raise KeyError("The 'arch' key is missing in encoder_params.")
+        
+        if encoder_params["arch"] == "resnet50":
+            from torchvision.models import resnet50
+            encoder = resnet50(pretrained=encoder_params.get("pretrained", True))
+            # Fully connected layer 제거
+            encoder = nn.Sequential(*list(encoder.children())[:-1])
+        else:
+            raise ValueError(f"Unsupported encoder architecture: {encoder_params['arch']}")
+        
+        return encoder
+
+    
+    def forward(self, img_anchor, img_positive, img_negative):
+        # 인코더를 사용해 특징 추출
+        feat_anchor = self.encoder(img_anchor).squeeze(-1).squeeze(-1)
+        feat_positive = self.encoder(img_positive).squeeze(-1).squeeze(-1)
+        feat_negative = self.encoder(img_negative).squeeze(-1).squeeze(-1)
+        
+        # 프로젝션 헤드 적용
+        proj_anchor = self.projector(feat_anchor)
+        proj_positive = self.projector(feat_positive)
+        proj_negative = self.projector(feat_negative)
+        
+        return proj_anchor, proj_positive, proj_negative
+    
+    def compute_loss(self, proj_anchor, proj_positive, proj_negative):
+        # TripletMarginLoss 정의
+        criterion = nn.TripletMarginLoss(margin=self.margin)
+        loss = criterion(proj_anchor, proj_positive, proj_negative)
+        return loss
