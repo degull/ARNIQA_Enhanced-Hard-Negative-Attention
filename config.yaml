@@ -13,9 +13,9 @@ checkpoint_frequency: 1  # 에폭마다 체크포인트 저장
 # Training
 training:
   epochs: 10    # 학습할 에폭 수
-  learning_rate: !!float 1e-3    # 학습률 추가
+  learning_rate: !!float 1e-4    # 학습률 추가
   batch_size: 16     # 배치 크기
-  lr: !!float 1e-3
+  lr: !!float 1e-4
   num_workers: 20   # 데이터 로딩에 사용할 워커 수
   log_images_frequency: 1000  # 로그에 이미지를 기록할 빈도 (n개의 배치마다)
   resume_training: false    # 이전 학습을 이어서 할지 여부
@@ -58,8 +58,8 @@ validation:
   datasets:  # 검증에 사용할 데이터셋 목록
     #- live
     #- csiq
-    #- tid2013
-    - kadid10k
+    - tid2013
+    #- kadid10k
     #- flive
     #- spaq
 
@@ -75,7 +75,7 @@ test:
     #- live
     #- csiq
     - tid2013
-    - kadid10k
+    #- kadid10k
     #- flive
     #- spaq
 
