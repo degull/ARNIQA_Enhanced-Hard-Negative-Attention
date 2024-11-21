@@ -80,7 +80,7 @@ target_layers = ['encoder.model.7', 'self_attention', 'cross_attention']
 grad_cam = GradCAM(model, target_layers)
 
 # 입력 이미지 로드 및 전처리
-image_path = "E:/ARNIQA - Enhanced-Hard-Negative-Attention/ARNIQA/assets/01.png"
+image_path = "E:/ARNIQA - Enhanced-Hard-Negative-Attention/ARNIQA/assets/02.png"
 input_image = cv2.imread(image_path)
 if input_image is None:
     raise FileNotFoundError(f"Image not found at the specified path: {image_path}")

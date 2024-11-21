@@ -1,5 +1,5 @@
 ## KADID
-""" 
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
@@ -41,7 +41,7 @@ def train(args, model, train_dataloader, val_dataloader, optimizer, lr_scheduler
     checkpoint_path = Path(args.checkpoint_base_path) / "am_kadid"
     checkpoint_path.mkdir(parents=True, exist_ok=True)
     
-    best_srocc, best_plcc = 0, 0  # 최종 SRCC와 PLCC 결과를 저장할 변수 초기화
+    best_srocc, best_plcc = 0, 0
 
     for epoch in range(args.training.epochs):
         model.train()
@@ -53,10 +53,23 @@ def train(args, model, train_dataloader, val_dataloader, optimizer, lr_scheduler
             inputs_positive = batch["img_positive"].to(device)
             inputs_negative = batch["img_negative"].to(device)
 
+            # 디버깅 정보 출력
+            print(f"[DEBUG] Epoch {epoch + 1}, Batch {i + 1}")
+            print(f"inputs_anchor shape: {inputs_anchor.shape}, inputs_positive shape: {inputs_positive.shape}, inputs_negative shape: {inputs_negative.shape}")
+            print(f"inputs_anchor values (mean/std): {inputs_anchor.mean().item():.4f} / {inputs_anchor.std().item():.4f}")
+            print(f"inputs_positive values (mean/std): {inputs_positive.mean().item():.4f} / {inputs_positive.std().item():.4f}")
+            print(f"inputs_negative values (mean/std): {inputs_negative.mean().item():.4f} / {inputs_negative.std().item():.4f}")
+
             optimizer.zero_grad()
             with torch.cuda.amp.autocast():
                 proj_anchor, proj_positive, proj_negative = model(inputs_anchor, inputs_positive, inputs_negative)
                 loss = model.compute_loss(proj_anchor, proj_positive, proj_negative)
+
+                # 디버깅 정보 출력: 프로젝션 결과
+                print(f"proj_anchor shape: {proj_anchor.shape}, proj_positive shape: {proj_positive.shape}, proj_negative shape: {proj_negative.shape}")
+                print(f"proj_anchor values (mean/std): {proj_anchor.mean().item():.4f} / {proj_anchor.std().item():.4f}")
+                print(f"proj_positive values (mean/std): {proj_positive.mean().item():.4f} / {proj_positive.std().item():.4f}")
+                print(f"proj_negative values (mean/std): {proj_negative.mean().item():.4f} / {proj_negative.std().item():.4f}")
 
             scaler.scale(loss).backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
@@ -65,6 +78,9 @@ def train(args, model, train_dataloader, val_dataloader, optimizer, lr_scheduler
 
             running_loss += loss.item()
             srocc, plcc = calculate_srcc_plcc(proj_anchor, proj_positive)
+            
+            # 디버깅 정보 출력: Loss, SRCC, PLCC
+            print(f"[DEBUG] Batch {i + 1} Loss: {loss.item():.4f}, SRCC: {srocc:.4f}, PLCC: {plcc:.4f}")
             progress_bar.set_postfix(loss=running_loss / (i + 1), SRCC=srocc, PLCC=plcc)
 
         lr_scheduler.step()
@@ -72,7 +88,7 @@ def train(args, model, train_dataloader, val_dataloader, optimizer, lr_scheduler
         # 매 에포크마다 검증 수행
         if epoch % args.validation.frequency == 0:
             avg_srocc, avg_plcc = validate(args, model, val_dataloader, device)
-            print(f"Validation - Epoch {epoch + 1}: SRCC = {avg_srocc:.4f}, PLCC = {avg_plcc:.4f}")
+            print(f"[DEBUG] Validation - Epoch {epoch + 1}: SRCC = {avg_srocc:.4f}, PLCC = {avg_plcc:.4f}")
             
             # 가장 높은 SRCC와 PLCC 결과 업데이트
             best_srocc = max(best_srocc, avg_srocc)
@@ -81,8 +97,8 @@ def train(args, model, train_dataloader, val_dataloader, optimizer, lr_scheduler
         if epoch % args.checkpoint_frequency == 0:
             save_checkpoint(model, checkpoint_path, epoch, avg_srocc)
 
-    # 학습이 완료된 후 최종 SRCC와 PLCC 결과 출력
-    print(f"Training Finished - Best SRCC: {best_srocc:.4f}, Best PLCC: {best_plcc:.4f}")
+    # 학습 완료 후 최종 결과 출력
+    print(f"[DEBUG] Training Finished - Best SRCC: {best_srocc:.4f}, Best PLCC: {best_plcc:.4f}")
 
 # 검증 함수
 def validate(args: DotMap, model: nn.Module, val_dataloader: DataLoader, device: torch.device) -> Tuple[float, float]:
@@ -177,7 +193,7 @@ if __name__ == "__main__":
     final_srocc, final_plcc = final_evaluation(model, test_dataloader, device)
     print(f"Test Results - Median SRCC: {final_srocc:.4f}, Median PLCC: {final_plcc:.4f}") 
 
- """
+
 
 
 # TID2013
@@ -840,161 +856,3 @@ if __name__ == "__main__":
     # 선형 리그레서를 통한 최종 성능 평가
     final_evaluation(model, val_dataloader, device)
  """
-
-## 원본수정
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, random_split
-import numpy as np
-from dotmap import DotMap
-from pathlib import Path
-from tqdm import tqdm
-from data import KADID10KDataset
-from utils.utils import parse_config
-from models.simclr import SimCLR
-from sklearn.linear_model import Ridge
-from scipy import stats
-
-# SRCC와 PLCC 계산 함수
-def calculate_srcc_plcc(predictions, targets):
-    # 일차원으로 변환하여 계산
-    srocc, _ = stats.spearmanr(predictions.flatten(), targets.flatten())
-    plcc, _ = stats.pearsonr(predictions.flatten(), targets.flatten())
-    return srocc, plcc
-
-
-# 검증 함수
-def validate(model, val_dataloader, device):
-    model.eval()
-    srocc_all, plcc_all = [], []
-    with torch.no_grad():
-        for batch in val_dataloader:
-            inputs_anchor = batch["img_anchor"].to(device)
-            inputs_positive = batch["img_positive"].to(device)
-            inputs_negative = batch["img_negative"].to(device)  # Negative 예제 추가
-            
-            # 모델에 anchor, positive, negative 이미지를 입력으로 전달
-            proj_anchor, proj_positive, proj_negative = model(inputs_anchor, inputs_positive, inputs_negative)
-            
-            srocc, plcc = calculate_srcc_plcc(proj_anchor.detach().cpu().numpy(), proj_positive.detach().cpu().numpy())
-            srocc_all.append(srocc)
-            plcc_all.append(plcc)
-
-    avg_srocc = np.mean(srocc_all) if srocc_all else 0
-    avg_plcc = np.mean(plcc_all) if plcc_all else 0
-    print(f"Validation - SRCC: {avg_srocc:.4f}, PLCC: {avg_plcc:.4f}")
-    return avg_srocc, avg_plcc
-
-# 학습 함수
-def train(args, model, train_dataloader, val_dataloader, optimizer, lr_scheduler, scaler, device):
-    checkpoint_path = Path(args.checkpoint_base_path) / "attention_mechanism"
-    checkpoint_path.mkdir(parents=True, exist_ok=True)
-    
-    best_srocc, best_plcc = 0, 0
-    for epoch in range(args.training.epochs):
-        model.train()
-        running_loss = 0.0
-        srocc_all, plcc_all = [], []
-        progress_bar = tqdm(train_dataloader, desc=f"Epoch [{epoch + 1}/{args.training.epochs}]")
-
-        for i, batch in enumerate(progress_bar):
-            inputs_anchor = batch["img_anchor"].to(device)
-            inputs_positive = batch["img_positive"].to(device)
-            inputs_negative = batch["img_negative"].to(device)  # Negative 예제 추가
-            
-            optimizer.zero_grad()
-
-            with torch.amp.autocast('cuda'):
-                proj_anchor, proj_positive, proj_negative = model(inputs_anchor, inputs_positive, inputs_negative)
-                loss = model.compute_loss(proj_anchor, proj_positive, proj_negative)
-
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            running_loss += loss.item()
-            
-            # Detach before converting to numpy to avoid gradient computation
-            srocc, plcc = calculate_srcc_plcc(proj_anchor.detach().cpu().numpy(), proj_positive.detach().cpu().numpy())
-            srocc_all.append(srocc)
-            plcc_all.append(plcc)
-
-            progress_bar.set_postfix(loss=running_loss / (i + 1), SRCC=np.mean(srocc_all), PLCC=np.mean(plcc_all))
-
-        if epoch % args.checkpoint_frequency == 0:
-            torch.save(model.state_dict(), checkpoint_path / f"epoch_{epoch}_srocc.pth")
-        lr_scheduler.step()
-
-        # 매 에포크마다 검증
-        print(f"\nEpoch {epoch + 1} validation:")
-        val_srcc, val_plcc = validate(model, val_dataloader, device)
-        best_srocc = max(best_srocc, val_srcc)
-        best_plcc = max(best_plcc, val_plcc)
-
-    print(f"Training finished - Best SRCC: {best_srocc:.4f}, Best PLCC: {best_plcc:.4f}")
-
-# 최종 평가 함수 - 인코더 가중치 고정 후 Ridge 회귀 모델을 통한 평가
-def final_evaluation(model, test_dataloader, device, num_repeats=10):
-    model.eval()
-    features, mos_scores = [], []
-    
-    # 인코더 가중치 고정
-    for param in model.encoder.parameters():
-        param.requires_grad = False
-
-    with torch.no_grad():
-        for batch in test_dataloader:
-            inputs = batch["img_anchor"].to(device)
-            mos = batch["mos"].to(device)
-            
-            # 인코더로부터 특징 추출 (tuple에서 필요한 텐서만 선택)
-            proj_anchor = model.encoder(inputs)
-            if isinstance(proj_anchor, tuple):
-                proj_anchor = proj_anchor[0]  # 필요한 첫 번째 요소만 선택
-            
-            # feature shape을 1차원으로 평탄화 (예: [batch_size, D] 형태로 유지)
-            proj_anchor = proj_anchor.cpu().numpy().reshape(inputs.size(0), -1)
-            features.append(proj_anchor)
-            mos_scores.append(mos.cpu().numpy())
-
-    # 리스트를 numpy 배열로 변환하여 Ridge 회귀 모델에 입력할 수 있도록 변환
-    features = np.vstack(features)
-    mos_scores = np.hstack(mos_scores)
-
-    srocc_list, plcc_list = [], []
-    for _ in range(num_repeats):
-        regressor = Ridge(alpha=1.0)
-        regressor.fit(features, mos_scores)
-        predictions = regressor.predict(features)
-        srocc, plcc = calculate_srcc_plcc(predictions, mos_scores)
-        srocc_list.append(srocc)
-        plcc_list.append(plcc)
-
-    print(f"Final Evaluation - Median SRCC: {np.median(srocc_list):.4f}, Median PLCC: {np.median(plcc_list):.4f}")
-
-if __name__ == "__main__":
-    args = parse_config('config.yaml')
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # 데이터셋 정의 및 분할
-    full_dataset = KADID10KDataset(Path(args.data_base_path) / "KADID10K", phase="all")
-    train_size = int(0.7 * len(full_dataset))
-    val_size = int(0.1 * len(full_dataset))
-    test_size = len(full_dataset) - train_size - val_size
-    train_dataset, val_dataset, test_dataset = random_split(full_dataset, [train_size, val_size, test_size])
-
-    # DataLoader 정의
-    train_dataloader = DataLoader(train_dataset, batch_size=args.training.batch_size, shuffle=True, num_workers=args.training.num_workers)
-    val_dataloader = DataLoader(val_dataset, batch_size=args.training.batch_size, shuffle=False, num_workers=args.training.num_workers)
-    test_dataloader = DataLoader(test_dataset, batch_size=args.training.batch_size, shuffle=False, num_workers=args.training.num_workers)
-
-    # 모델 및 옵티마이저, 스케줄러 정의
-    model = SimCLR(encoder_params=args.model.encoder, temperature=args.model.temperature).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.training.learning_rate)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.training.step_size, gamma=args.training.gamma)
-    scaler = torch.cuda.amp.GradScaler()
-
-    # 학습 함수 호출
-    train(args, model, train_dataloader, val_dataloader, optimizer, lr_scheduler, scaler, device)
-    
-    # 인코더 고정 후 선형 리그레서를 통한 최종 성능 평가
-    final_evaluation(model, test_dataloader, device)
