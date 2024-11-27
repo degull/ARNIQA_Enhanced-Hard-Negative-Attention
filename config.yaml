@@ -1,21 +1,26 @@
+    #- live
+    #- csiq
+    #- tid2013
+    #- kadid10k
+    #- flive
+    #- spaq
+
 # General settings
-experiment_name: "hard_negative"   # 이름을 바꿔주세요
+experiment_name: "hard_negative_attention"   # Attention을 강조한 이름으로 변경
 device: 0   # GPU id (CUDA가 활성화된 경우) - CPU를 사용하려면 -1로 설정
 seed: 27  # 랜덤 시드 설정
-data_base_path: "E:/ARNIQA - Enhanced-Hard-Negative-Attention/ARNIQA/dataset"  # 데이터셋 경로
-
+data_base_path: "E:/ARNIQA_Enhanced-Hard-Negative-Attention/dataset"  # 데이터셋 경로
 
 # Checkpoint settings
-checkpoint_base_path: "E:/ARNIQA - Enhanced-Hard-Negative-Attention/ARNIQA/checkpoints/attention_mechanism"
-
+checkpoint_base_path: "E:/ARNIQA_Enhanced-Hard-Negative-Attention/checkpoints/attention_mechanism"
 checkpoint_frequency: 1  # 에폭마다 체크포인트 저장
 
 # Training
 training:
   epochs: 10    # 학습할 에폭 수
-  learning_rate: !!float 1e-4    # 학습률 추가
+  learning_rate: !!float 1e-3    # 학습률 추가
   batch_size: 16     # 배치 크기
-  lr: !!float 1e-4
+  lr: !!float 1e-3
   num_workers: 20   # 데이터 로딩에 사용할 워커 수
   log_images_frequency: 1000  # 로그에 이미지를 기록할 빈도 (n개의 배치마다)
   resume_training: false    # 이전 학습을 이어서 할지 여부
@@ -39,6 +44,15 @@ training:
     T_mult: 2   # CosineAnnealingWarmRestarts의 T_mult 값
     eta_min: !!float 1e-6   # 최소 학습률
 
+# Attention Settings (추가)
+attention:
+  use_self_attention: true   # Self-Attention 활성화 여부
+  use_cross_attention: true  # Cross-Attention 활성화 여부
+  embed_dim: 128             # Attention 임베딩 차원
+  num_heads: 32               # Multi-Head Attention 헤드 수
+  dropout: 0.07             # Attention Dropout 비율 ( 0.07 -> 가장 안정적)
+  num_layers: 2              # Attention 레이어 수
+
 # Validation
 validation:
   frequency: 1    # 에폭마다 검증할 빈도
@@ -56,12 +70,7 @@ validation:
       min_dist: 0.2   # UMAP의 최소 거리
       metric: euclidean   # UMAP의 메트릭
   datasets:  # 검증에 사용할 데이터셋 목록
-    #- live
-    #- csiq
-    - tid2013
-    #- kadid10k
-    #- flive
-    #- spaq
+    - kadid10k
 
 # Test
 test:
@@ -72,19 +81,12 @@ test:
   alpha: 0.1  # 그리드 탐색을 사용하지 않을 때 사용할 alpha 값
   crop_size: 224  # 추론할 때 사용할 이미지 크기
   datasets:  # 테스트에 사용할 데이터셋 목록
-    #- live
-    #- csiq
-    - tid2013
-    #- kadid10k
-    #- flive
-    #- spaq
+    - kadid10k
 
 # Model
 model:
   temperature: 0.1    # NT-Xent 손실 함수에 사용할 온도 값
-  margin: 1.0
   encoder:    # 인코더 파라미터
-    arch: "resnet50"
     embedding_dim: 128    # 임베딩 차원 수
     pretrained: true    # ImageNet 사전 학습 가중치를 사용할지 여부
     use_norm: true    # 임베딩을 정규화할지 여부

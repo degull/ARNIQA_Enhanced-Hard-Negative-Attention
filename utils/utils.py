@@ -12,11 +12,6 @@ from scipy import stats
 # 프로젝트 루트 경로 설정
 PROJECT_ROOT = Path(__file__).absolute().parents[1].absolute()
 
-def clip_gradients(model, max_norm=5.0):
-    """Clips gradients of the model parameters to the specified maximum norm."""
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
-
-
 def calculate_srcc_plcc(proj_A, proj_B):
     """SRCC와 PLCC 계산"""
     proj_A = proj_A.detach().cpu().numpy()

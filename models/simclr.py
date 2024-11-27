@@ -382,7 +382,7 @@ class ModifiedSimCLR(nn.Module):  # 여기에서 ModifiedSimCLR 이름을 SimCLR
 
 
 # 수정
-import torch
+""" import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dotmap import DotMap
@@ -390,7 +390,7 @@ from models.resnet import ResNet
 from models.attention_module import DistortionAttention, HardNegativeCrossAttention
 from torch.nn import TripletMarginLoss
 
-class SimCLR(nn.Module):
+class SimCLR(nn.Module):  # ModifiedSimCLR 이름을 SimCLR로 변경
     def __init__(self, encoder_params: DotMap, temperature: float = 0.1, margin: float = 1.0):
         super(SimCLR, self).__init__()
 
@@ -436,18 +436,77 @@ class SimCLR(nn.Module):
 
         return anchor_proj, positive_proj, negative_proj
 
-    def forward_single(self, img_anchor):
-        """
-        Grad-CAM에서 단일 이미지를 처리하기 위한 forward 메서드
-        """
+    def compute_loss(self, anchor, positive, negative):
+        return self.triplet_loss(anchor, positive, negative)
+ """
+
+# Attention 관련 파라미터를 추가
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from dotmap import DotMap
+from models.resnet import ResNet
+from models.attention_module import DistortionAttention, HardNegativeCrossAttention
+from torch.nn import TripletMarginLoss
+
+class SimCLR(nn.Module):
+    def __init__(self, encoder_params: DotMap, attention_params: DotMap, temperature: float = 0.1, margin: float = 1.0):
+        super(SimCLR, self).__init__()
+
+        # ResNet Encoder와 projection layer
+        self.encoder = ResNet(
+            embedding_dim=encoder_params.embedding_dim,
+            pretrained=encoder_params.pretrained,
+            use_norm=encoder_params.use_norm
+        )
+        
+        # projector의 첫 번째 Linear 레이어 입력 크기를 2048로 설정
+        self.projector = nn.Sequential(
+            nn.Linear(2048, 1024),
+            nn.ReLU(),
+            nn.Linear(1024, encoder_params.embedding_dim)
+        )
+
+        # Self-Attention 및 Cross-Attention 초기화
+        self.self_attention = DistortionAttention(
+            embed_dim=attention_params.embed_dim,
+            num_heads=attention_params.num_heads,
+            dropout=attention_params.dropout,
+            num_layers=attention_params.num_layers
+        )
+        self.cross_attention = HardNegativeCrossAttention(
+            embed_dim=attention_params.embed_dim,
+            num_heads=attention_params.num_heads,
+            dropout=attention_params.dropout,
+            num_layers=attention_params.num_layers
+        )
+
+        self.temperature = temperature
+        self.triplet_loss = TripletMarginLoss(margin=margin)
+
+        # 초기화 방법 설정 (xavier 초기화)
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        # Sequential 내부의 Linear 레이어 각각 초기화
+        for layer in self.projector:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
+
+    def forward(self, img_anchor, img_positive, img_negative):
+        # Encoder 통과 후 projector를 거쳐 attention 적용
         anchor_features = self.encoder(img_anchor)[0]
+        positive_features = self.encoder(img_positive)[0]
+        negative_features = self.encoder(img_negative)[0]
+
+        # Self-Attention 적용
         anchor_proj = self.self_attention(self.projector(anchor_features))
+        positive_proj = self.self_attention(self.projector(positive_features))
+        negative_proj = self.self_attention(self.projector(negative_features))
 
-        # Cross-Attention 활성화 추가 (더미 데이터 사용)
-        dummy_low_res_features = torch.zeros_like(anchor_proj)  # Cross-Attention을 활성화하기 위한 임시 데이터
-        cross_output = self.cross_attention(anchor_proj, dummy_low_res_features)
-
-        return cross_output
+        return anchor_proj, positive_proj, negative_proj
 
     def compute_loss(self, anchor, positive, negative):
         return self.triplet_loss(anchor, positive, negative)
