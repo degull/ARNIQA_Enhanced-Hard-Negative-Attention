@@ -138,13 +138,15 @@ class KADID10KDataset(Dataset):
 import pandas as pd
 import re
 import numpy as np
-from PIL import Image
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
 from pathlib import Path
-from PIL import ImageFilter
 import random
+from PIL import Image, ImageFilter
+
+
+
 
 # 왜곡 유형 매핑
 distortion_types_mapping = {
@@ -247,7 +249,8 @@ class KADID10KDataset(Dataset):
             "img_anchor": img_anchor,
             "img_positive": img_positive,
             "img_negative": img_negative,
-            "mos": self.mos[index]
+            "mos": self.mos[index],
+            "path": str(self.images[index])  # 이미지 경로 추가
         }
 
     def __len__(self):
