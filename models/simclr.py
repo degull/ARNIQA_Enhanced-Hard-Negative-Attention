@@ -161,7 +161,9 @@ if __name__ == "__main__":
     print(f"proj_A shape: {proj_A.shape}, proj_B shape: {proj_B.shape}")
  """
 
-""" import torch
+""" 
+# simclr 원본 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dotmap import DotMap
@@ -381,8 +383,9 @@ class ModifiedSimCLR(nn.Module):  # 여기에서 ModifiedSimCLR 이름을 SimCLR
  """
 
 
-# 수정
-""" import torch
+# 이게 simclr 원본
+""" 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dotmap import DotMap
@@ -390,7 +393,7 @@ from models.resnet import ResNet
 from models.attention_module import DistortionAttention, HardNegativeCrossAttention
 from torch.nn import TripletMarginLoss
 
-class SimCLR(nn.Module):  # ModifiedSimCLR 이름을 SimCLR로 변경
+class SimCLR(nn.Module):  
     def __init__(self, encoder_params: DotMap, temperature: float = 0.1, margin: float = 1.0):
         super(SimCLR, self).__init__()
 
@@ -438,10 +441,77 @@ class SimCLR(nn.Module):  # ModifiedSimCLR 이름을 SimCLR로 변경
 
     def compute_loss(self, anchor, positive, negative):
         return self.triplet_loss(anchor, positive, negative)
- """
+     """
+
+# 12/6 수정
+import torch
+import torch.nn as nn
+from models.attention_module import DistortionAttention, HardNegativeCrossAttention
+from models.resnet import ResNet
+
+
+class SimCLR(nn.Module):
+    def __init__(self, encoder_params, temperature: float = 0.1, margin: float = 1.0):
+        super(SimCLR, self).__init__()
+        self.encoder = ResNet(
+            embedding_dim=encoder_params.embedding_dim,
+            pretrained=encoder_params.pretrained,
+            use_norm=encoder_params.use_norm
+        )
+        self.projector = nn.Sequential(
+            nn.Linear(2048, 1024),
+            nn.ReLU(),
+            nn.Linear(1024, encoder_params.embedding_dim)
+        )
+        self.self_attention = DistortionAttention(embed_dim=encoder_params.embedding_dim, num_heads=8)
+        self.cross_attention = HardNegativeCrossAttention(embed_dim=encoder_params.embedding_dim, num_heads=8)
+        self.temperature = temperature
+        self.triplet_loss = nn.TripletMarginLoss(margin=margin)
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for layer in self.projector:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
+            elif isinstance(layer, nn.BatchNorm1d):  # BatchNorm 초기화
+                nn.init.ones_(layer.weight)
+                nn.init.zeros_(layer.bias)
+
+    def forward(self, img_anchor, img_positive, img_negative):
+        # ResNet encoder
+        anchor_features = self.encoder(img_anchor)[0]
+        positive_features = self.encoder(img_positive)[0]
+        negative_features = self.encoder(img_negative)[0]
+
+        # Self-Attention
+        anchor_proj = self.self_attention(self.projector(anchor_features).unsqueeze(1)).squeeze(1)
+        positive_proj = self.self_attention(self.projector(positive_features).unsqueeze(1)).squeeze(1)
+        print(f"[Debug] Anchor projection shape: {anchor_proj.shape}, Positive projection shape: {positive_proj.shape}")
+
+        # Cross-Attention
+        if negative_features is None:
+            raise ValueError("[Error] Negative features are None. Check the data preprocessing pipeline.")
+
+        negative_proj = self.cross_attention(
+            self.projector(anchor_features),
+            self.projector(negative_features)
+        )
+        print(f"[Debug] Negative projection shape: {negative_proj.shape}")
+
+        return anchor_proj, positive_proj, negative_proj
+
+    def compute_loss(self, anchor, positive, negative):
+        if anchor is None or positive is None or negative is None:
+            raise ValueError("[Error] One or more inputs to compute_loss are None.")
+        return self.triplet_loss(anchor, positive, negative)
+
+
+
 
 # Attention 관련 파라미터를 추가
-import torch
+""" import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dotmap import DotMap
@@ -510,3 +580,4 @@ class SimCLR(nn.Module):
 
     def compute_loss(self, anchor, positive, negative):
         return self.triplet_loss(anchor, positive, negative)
+ """

@@ -228,10 +228,7 @@ class HardNegativeCrossAttention(nn.Module):
 # Positional Encoding과 Conv/2 + ReLU 추가
 import torch
 import torch.nn as nn
-import torch.nn.init as init
-import math
 
-# Layer Normalization → Multi-Head Attention → Dropout
 class DistortionAttention(nn.Module):
     def __init__(self, embed_dim, num_heads=8, dropout=0.1, num_layers=2):
         super(DistortionAttention, self).__init__()
@@ -240,92 +237,40 @@ class DistortionAttention(nn.Module):
             for _ in range(num_layers)
         ])
         self.dropout = nn.Dropout(dropout)
-        self.norm = nn.LayerNorm(embed_dim)  # Layer normalization 추가
-        self._initialize_weights()
+        self.norm = nn.LayerNorm(embed_dim)
 
-    def _initialize_weights(self):
-        for layer in self.layers:
-            for name, param in layer.named_parameters():
-                if 'weight' in name:
-                    init.xavier_uniform_(param)
-                elif 'bias' in name:
-                    param.data.fill_(0)
+    def forward(self, x):
+        for i, layer in enumerate(self.layers):
+            x = self.norm(x)
+            x, _ = layer(x, x, x)  # Self-Attention
+            x = self.dropout(x)
+            print(f"[Debug] Layer {i + 1} attention output shape: {x.shape}")
+        return x
 
-    def forward(self, features):
-        attn_output = features
-        for layer in self.layers:
-            attn_output = self.norm(attn_output)  # Layer normalization - 입력에 적용
-            attn_output, _ = layer(attn_output, attn_output, attn_output)
-            attn_output = self.dropout(attn_output)
-            attn_output = self.norm(attn_output)  # Layer normalization - 출력에 적용
-        return attn_output
 
 class HardNegativeCrossAttention(nn.Module):
     def __init__(self, embed_dim, num_heads=8, dropout=0.1, num_layers=2):
         super(HardNegativeCrossAttention, self).__init__()
-
-        # Positional Encoding
-        self.positional_encoding = nn.Parameter(torch.randn(1, embed_dim), requires_grad=True)
-        
-        # Conv/2 + ReLU 레이어
-        self.conv1 = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, stride=2, padding=1)
-        self.conv2 = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, stride=2, padding=1)
-        self.relu = nn.ReLU()
-        
-        # Multi-Head Attention Layers
         self.layers = nn.ModuleList([
             nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, dropout=dropout)
             for _ in range(num_layers)
         ])
-        
-        # Dropout and Layer Normalization
         self.dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(embed_dim)
-        
-        # Initialize weights
-        self._initialize_weights()
-
-    def _initialize_weights(self):
-        for layer in self.layers:
-            for name, param in layer.named_parameters():
-                if 'weight' in name:
-                    init.xavier_uniform_(param)
-                elif 'bias' in name:
-                    param.data.fill_(0)
 
     def forward(self, high_res_features, low_res_features):
-        # Positional Encoding 추가
-        high_res_features = high_res_features + self.positional_encoding
-        low_res_features = low_res_features + self.positional_encoding
+        # [Batch, Embed] -> [Batch, Seq=1, Embed]
+        high_res_features = high_res_features.unsqueeze(1)
+        low_res_features = low_res_features.unsqueeze(1)
 
-        # Conv/2 + ReLU 적용
-        # Conv2d는 입력을 4차원 (B, C, H, W) 형태로 받기 때문에 채널 차원을 맞춰줘야 함
-        high_res_features = high_res_features.unsqueeze(-1).unsqueeze(-1)
-        low_res_features = low_res_features.unsqueeze(-1).unsqueeze(-1)
-
-        high_res_features = self.conv1(high_res_features)
-        high_res_features = self.relu(high_res_features)
-        low_res_features = self.conv2(low_res_features)
-        low_res_features = self.relu(low_res_features)
-
-        # Conv2d 연산 후 2차원 (Batch, Embed_dim) 형태로 변환
-        high_res_features = high_res_features.squeeze(-1).squeeze(-1)
-        low_res_features = low_res_features.squeeze(-1).squeeze(-1)
-
-        # Multi-Head Cross Attention Layers
         attn_output = high_res_features
-        for layer in self.layers:
-            # Layer Normalization
+        for i, layer in enumerate(self.layers):
             attn_output = self.norm(attn_output)
-            # Multi-Head Cross Attention
             attn_output, _ = layer(attn_output, low_res_features, low_res_features)
-            # Dropout
             attn_output = self.dropout(attn_output)
-            # Output에 Layer Normalization 추가
-            attn_output = self.norm(attn_output)
-        
-        return attn_output
 
+        # [Batch, Seq=1, Embed] -> [Batch, Embed]
+        return attn_output.squeeze(1)
 
 
 """ 

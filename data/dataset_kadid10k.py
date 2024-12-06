@@ -145,9 +145,6 @@ from pathlib import Path
 import random
 from PIL import Image, ImageFilter
 
-
-
-
 # 왜곡 유형 매핑
 distortion_types_mapping = {
     1: "gaussian_blur",
@@ -185,12 +182,12 @@ class KADID10KDataset(Dataset):
         self.crop_size = crop_size
 
         # CSV 파일에서 점수 로드
-        scores_csv = pd.read_csv(self.root / "kadid10k.csv")
+        scores_csv = pd.read_csv(self.root)  # 수정된 부분
         scores_csv = scores_csv[["dist_img", "ref_img", "dmos"]]
 
         # 이미지 경로 설정
-        self.images = np.array([self.root / "images" / img for img in scores_csv["dist_img"].values])
-        self.ref_images = np.array([self.root / "images" / img for img in scores_csv["ref_img"].values])
+        self.images = np.array([self.root.parent / "images" / img for img in scores_csv["dist_img"].values])
+        self.ref_images = np.array([self.root.parent / "images" / img for img in scores_csv["ref_img"].values])
         self.mos = np.array(scores_csv["dmos"].values.tolist())
 
         self.distortion_types = []
@@ -208,7 +205,7 @@ class KADID10KDataset(Dataset):
         self.distortion_levels = np.array(self.distortion_levels)
 
         if self.phase != "all":
-            split_idxs = np.load(self.root / "splits" / f"{self.phase}.npy")[split_idx]
+            split_idxs = np.load(self.root.parent / "splits" / f"{self.phase}.npy")[split_idx]
             split_idxs = np.array(list(filter(lambda x: x != -1, split_idxs)))  # 패딩 제거
             self.images = self.images[split_idxs]
             self.ref_images = self.ref_images[split_idxs]
@@ -224,14 +221,21 @@ class KADID10KDataset(Dataset):
         ])(image)
     
     def apply_distortion(self, image: torch.Tensor) -> torch.Tensor:
-        # Convert tensor to PIL image
+        """
+        Apply various distortions to the image
+        """
         pil_image = transforms.ToPILImage()(image)
-        
-        # Apply a random distortion (e.g., Gaussian Blur)
-        if random.random() > 0.5:
-            return transforms.ToTensor()(pil_image.filter(ImageFilter.GaussianBlur(radius=2)))
-        
-        return image  # Return original image if no distortion applied
+        distortions = [
+            lambda img: img.filter(ImageFilter.GaussianBlur(radius=2)),  # Gaussian Blur
+            lambda img: img.filter(ImageFilter.BoxBlur(1)),  # Box Blur
+            lambda img: img.rotate(15),  # Rotate
+            lambda img: img.transpose(Image.FLIP_LEFT_RIGHT),  # Horizontal Flip
+            lambda img: img.filter(ImageFilter.SHARPEN),  # Sharpen
+        ]
+        # Randomly select a distortion
+        distortion = random.choice(distortions)
+        distorted_image = distortion(pil_image)
+        return transforms.ToTensor()(distorted_image)
 
     def __getitem__(self, index: int) -> dict:
         # Anchor 이미지로 distorted image 사용
@@ -245,18 +249,25 @@ class KADID10KDataset(Dataset):
         img_positive = self.transform(img_positive)
         img_negative = self.transform(img_negative)
 
+        # Distortion 추가
+        img_anchor = self.apply_distortion(img_anchor)
+        img_positive = self.apply_distortion(img_positive)
+        img_negative = self.apply_distortion(img_negative)
+
         return {
             "img_anchor": img_anchor,
             "img_positive": img_positive,
             "img_negative": img_negative,
             "mos": self.mos[index],
-            "path": str(self.images[index])  # 이미지 경로 추가
+            "path": str(self.images[index]),  # 이미지 경로 추가
+            "distortion_type": self.distortion_types[index],  # 왜곡 유형 추가
+            "distortion_level": self.distortion_levels[index],  # 왜곡 레벨 추가
         }
 
     def __len__(self):
         return len(self.images)
 
     def get_split_indices(self, split: int, phase: str) -> np.ndarray:
-        split_file_path = self.root / "splits" / f"{phase}.npy"
+        split_file_path = self.root.parent / "splits" / f"{phase}.npy"
         split_indices = np.load(split_file_path)[split]
         return split_indices

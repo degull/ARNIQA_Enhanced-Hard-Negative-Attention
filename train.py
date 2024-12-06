@@ -1,5 +1,5 @@
 ## KADID
- 
+"""  
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
@@ -13,6 +13,8 @@ from data import KADID10KDataset
 from utils.utils import parse_config
 from models.simclr import SimCLR
 from typing import Tuple
+import matplotlib.pyplot as plt
+import argparse
 
 # 모델 체크포인트 저장 함수
 def save_checkpoint(model: nn.Module, checkpoint_path: Path, epoch: int, srocc: float) -> None:
@@ -37,7 +39,7 @@ def get_split_indices(dataset, train_ratio=0.7, val_ratio=0.1, test_ratio=0.2):
     return train_size, val_size, test_size
 
 # 학습 함수
-def train(args, model, train_dataloader, val_dataloader, test_dataloader, optimizer, lr_scheduler, scaler, device):
+def train(args, model, train_dataloader, val_dataloader, optimizer, lr_scheduler, scaler, device):
     checkpoint_path = Path(args.checkpoint_base_path) / "am_kadid"
     checkpoint_path.mkdir(parents=True, exist_ok=True)
 
@@ -96,11 +98,46 @@ def train(args, model, train_dataloader, val_dataloader, test_dataloader, optimi
     for epoch, srocc, plcc in epoch_train_results:
         print(f"Epoch {epoch}: SRCC = {srocc:.4f}, PLCC = {plcc:.4f}")
 
+
+def plot_regression_results(true_scores, predicted_scores, title="Regression Results"):
+    
+    # 리지 회귀 결과를 시각화합니다.
+    # Args:
+    #     true_scores (np.ndarray): 실제 MOS 값.
+    #     predicted_scores (np.ndarray): 예측된 MOS 값.
+    #     title (str): 그래프 제목.
+    
+    plt.figure(figsize=(8, 6))
+    plt.scatter(true_scores, predicted_scores, alpha=0.7, color='blue', label="Predictions")
+    plt.plot([min(true_scores), max(true_scores)], [min(true_scores), max(true_scores)], 
+             '--', color='red', label="Ideal Line")
+    plt.xlabel("True MOS")
+    plt.ylabel("Predicted MOS")
+    plt.title(title)
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+    # Residuals Plot
+    residuals = true_scores - predicted_scores
+    plt.figure(figsize=(8, 6))
+    plt.scatter(true_scores, residuals, alpha=0.7, color='green', label="Residuals")
+    plt.axhline(0, color='red', linestyle='--', label="Zero Residual Line")
+    plt.xlabel("True MOS")
+    plt.ylabel("Residuals")
+    plt.title("Residuals Analysis")
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+
+
+
 # 검증 함수
-def validate(args: DotMap, model: nn.Module, val_dataloader: DataLoader, device: torch.device) -> Tuple[float, float]:
+def validate(args: DotMap, model: nn.Module, val_dataloader: DataLoader, device: torch.device):
     model.eval()
-    srocc_all = []
-    plcc_all = []
+    srocc_list, plcc_list = [], []
+    all_preds, all_targets = [], []
 
     with torch.no_grad():
         for batch in val_dataloader:
@@ -108,17 +145,27 @@ def validate(args: DotMap, model: nn.Module, val_dataloader: DataLoader, device:
             inputs_positive = batch["img_positive"].to(device)
             inputs_negative = batch["img_negative"].to(device)
 
-            proj_anchor, proj_positive, _ = model(inputs_anchor, inputs_positive, inputs_negative)
+            proj_anchor, proj_positive, proj_negative = model(inputs_anchor, inputs_positive, inputs_negative)
+
+            # SRCC와 PLCC 계산
             srocc, plcc = calculate_srcc_plcc(proj_anchor, proj_positive)
+            srocc_list.append(srocc)
+            plcc_list.append(plcc)
 
-            if not np.isnan(srocc) and not np.isnan(plcc):
-                srocc_all.append(srocc)
-                plcc_all.append(plcc)
+            # 예측값과 실제 MOS 값 저장
+            preds = (proj_anchor + proj_positive).mean(dim=1).cpu().numpy()
+            all_preds.extend(preds)
+            all_targets.extend(batch["mos"].cpu().numpy())
 
-    avg_srocc = np.mean(srocc_all) if srocc_all else 0
-    avg_plcc = np.mean(plcc_all) if plcc_all else 0
+    avg_srocc = np.mean(srocc_list) if srocc_list else 0
+    avg_plcc = np.mean(plcc_list) if plcc_list else 0
+
+    # Regressor 그래프 출력
+    if all_preds and all_targets:
+        plot_regression_results(np.array(all_targets), np.array(all_preds), title="Validation Regression Results")
 
     return avg_srocc, avg_plcc
+
 
 # 최종 테스트 함수
 def test(args, model, test_dataloader, device):
@@ -126,43 +173,321 @@ def test(args, model, test_dataloader, device):
     print(f"\nTest Results - SRCC: {avg_srocc_test:.4f}, PLCC: {avg_plcc_test:.4f}")
 
 if __name__ == "__main__":
-    args = parse_config('config.yaml')
+    # Argument parsing
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, required=True, help='Configuration file')
+    args, _ = parser.parse_known_args()
+    config = parse_config(args.config)
+
+    # Config 병합
+    args.__dict__.update(config)  # 간단한 병합 방식 사용
+    args.data_base_path = Path(args.data_base_path)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 데이터셋 및 DataLoader 정의
-    full_dataset = KADID10KDataset(Path(args.data_base_path) / "KADID10K", phase="all")
-    train_size, val_size, test_size = get_split_indices(full_dataset)
+    # 데이터셋 분리
+    full_dataset = KADID10KDataset(args.data_base_path / "KADID10K", phase="all")
+    dataset_size = len(full_dataset)
+    train_size = int(0.7 * dataset_size)
+    val_size = int(0.1 * dataset_size)
+    test_size = dataset_size - train_size - val_size
+
     train_dataset, val_dataset, test_dataset = random_split(full_dataset, [train_size, val_size, test_size])
 
-    # 데이터 중복 확인
-    #train_samples = set([sample["path"] for sample in train_dataset])
-    #test_samples = set([sample["path"] for sample in test_dataset])
-    #overlap = train_samples.intersection(test_samples)
-    #print(f"Train/Test 데이터 중복 샘플 수: {len(overlap)}")
-
+    # 데이터 로더 생성
     train_dataloader = DataLoader(train_dataset, batch_size=args.training.batch_size, shuffle=True, num_workers=args.training.num_workers)
     val_dataloader = DataLoader(val_dataset, batch_size=args.training.batch_size, shuffle=False, num_workers=args.training.num_workers)
     test_dataloader = DataLoader(test_dataset, batch_size=args.training.batch_size, shuffle=False, num_workers=args.training.num_workers)
 
-    # 모델 정의
-    model = SimCLR(
-        encoder_params=args.model.encoder,
-        attention_params=args.attention,
-        temperature=args.model.temperature,
-        margin=1.0
-    ).to(device)
+    # 모델 초기화
+    model = SimCLR(encoder_params=args.model.encoder).to(device)
 
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.training.learning_rate)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.training.step_size, gamma=args.training.gamma)
+    scaler = torch.amp.GradScaler()
+
+    # 학습 시작
+    train(args, model, train_dataloader, val_dataloader, optimizer, lr_scheduler, scaler, device)
+
+    # 테스트
+    print("Testing the model...")
+    avg_srocc_test, avg_plcc_test = validate(args, model, test_dataloader, device)
+    print(f"Test Results - SRCC: {avg_srocc_test:.4f}, PLCC: {avg_plcc_test:.4f}")
+
+ """
+
+## 12/6
+# KADID ver1
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, random_split
+import numpy as np
+from dotmap import DotMap
+from pathlib import Path
+from tqdm import tqdm
+from scipy import stats
+from sklearn.linear_model import Ridge
+from data import KADID10KDataset
+from utils.utils import parse_config
+from models.simclr import SimCLR
+from typing import Tuple
+import matplotlib.pyplot as plt
+import argparse
+from sklearn.model_selection import GridSearchCV
+from utils.utils_distortions import generate_hard_negatives
+
+
+def verify_hard_negatives(original_shape, downscaled_shape, scale_factor=0.5, is_projection=False):
+    if is_projection:
+        print(f"[Debug] Projection 검증: {downscaled_shape}")
+        if len(downscaled_shape) != 2 or downscaled_shape[-1] != 128:
+            print(f"[Error] Projection 크기 오류: 예상 크기 [Batch, 128], 실제 크기 {downscaled_shape}")
+        else:
+            print("[Projection Verification] Success: 임베딩 크기가 올바릅니다.")
+        return
+
+    print(f"[Debug] 원본 크기: {original_shape}, 다운스케일 크기: {downscaled_shape}")
+    if len(original_shape) == 4 and len(downscaled_shape) == 4:
+        expected_height = int(original_shape[-2] * scale_factor)
+        expected_width = int(original_shape[-1] * scale_factor)
+
+        if downscaled_shape[-2] == expected_height and downscaled_shape[-1] == expected_width:
+            print("[Hard Negative Verification] Success: Hard negatives가 올바르게 다운스케일되었습니다.")
+        else:
+            print("[Hard Negative Verification] Error: Hard negatives가 올바르게 다운스케일되지 않았습니다.")
+            print(f"예상 크기: ({expected_height}, {expected_width}), 실제 크기: {downscaled_shape[-2:]}")
+    else:
+        print("[Hard Negative Verification] Error: 잘못된 입력 형식입니다.")
+
+
+
+# 양성 쌍 검증 함수
+def verify_positive_pairs(distortions_A, distortions_B):
+    print(f"[Debug] Distortion_A: {distortions_A}, Distortion_B: {distortions_B}")
+    if distortions_A == distortions_B:
+        print("[Positive Pair Verification] Success: Distortions match.")
+    else:
+        print("[Positive Pair Verification] Error: Distortions do not match.")
+
+
+# 모델 체크포인트 저장 함수
+def save_checkpoint(model: nn.Module, checkpoint_path: Path, epoch: int, srocc: float) -> None:
+    filename = f"epoch_{epoch}_srocc_{srocc:.3f}.pth"
+    torch.save(model.state_dict(), checkpoint_path / filename)
+    print(f"Checkpoint saved: {checkpoint_path / filename}")
+
+
+# SRCC와 PLCC 계산 함수
+def calculate_srcc_plcc(proj_A, proj_B):
+    proj_A = proj_A.detach().cpu().numpy()
+    proj_B = proj_B.detach().cpu().numpy()
+    srocc, _ = stats.spearmanr(proj_A.flatten(), proj_B.flatten())
+    plcc, _ = stats.pearsonr(proj_A.flatten(), proj_B.flatten())
+    return srocc, plcc
+
+
+# Ridge Regressor 학습
+def train_ridge_regressor(model, train_dataloader, device):
+    model.eval()
+    embeddings, mos_scores = [], []
+
+    with torch.no_grad():
+        for batch in train_dataloader:
+            inputs = batch["img_anchor"].to(device)
+            mos = batch["mos"]
+
+            proj, _, _ = model(inputs, inputs, inputs)
+            embeddings.append(proj.cpu().numpy())
+            mos_scores.append(mos.cpu().numpy())
+
+    embeddings = np.vstack(embeddings)
+    mos_scores = np.hstack(mos_scores)
+    regressor = optimize_ridge_alpha(embeddings, mos_scores)
+    return regressor
+
+
+# Ridge Regressor 평가
+def evaluate_ridge_regressor(regressor, model, test_dataloader, device):
+    model.eval()
+    mos_scores, predictions = [], []
+
+    with torch.no_grad():
+        for batch in test_dataloader:
+            inputs = batch["img_anchor"].to(device)
+            mos = batch["mos"]
+
+            # SimCLR 모델 호출
+            proj, _, _ = model(inputs, inputs, inputs)  # 필요한 반환값만 사용하도록 수정
+
+            # Ridge Regressor로 예측
+            prediction = regressor.predict(proj.cpu().numpy())
+
+            mos_scores.append(mos.cpu().numpy())
+            predictions.append(prediction)
+
+    mos_scores = np.hstack(mos_scores)
+    predictions = np.hstack(predictions)
+    return mos_scores, predictions
+
+
+
+# 플로팅 함수
+def plot_results(true_scores, predicted_scores, title="Regression Results"):
+    plt.figure(figsize=(8, 6))
+    plt.scatter(true_scores, predicted_scores, alpha=0.7, label="Predictions vs MOS")
+    plt.plot([min(true_scores), max(true_scores)], [min(true_scores), max(true_scores)], 'r--', label="Ideal")
+    plt.xlabel("True MOS")
+    plt.ylabel("Predicted MOS")
+    plt.title(title)
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+
+# 학습 함수
+def train(args, model, train_dataloader, val_dataloader, optimizer, lr_scheduler, scaler, device):
+    checkpoint_path = Path(args.checkpoint_base_path) / "am_kadid"
+    checkpoint_path.mkdir(parents=True, exist_ok=True)
+
+    best_srocc = 0
+    for epoch in range(args.training.epochs):
+        model.train()
+        running_loss = 0.0
+
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch [{epoch + 1}/{args.training.epochs}]")
+
+        for batch in progress_bar:
+            inputs_anchor = batch["img_anchor"].to(device)
+            inputs_positive = batch["img_positive"].to(device)
+            inputs_negative = batch["img_negative"].to(device)
+
+            # Hard negatives 생성
+            try:
+                generated_hard_negatives = generate_hard_negatives(inputs_negative, scale_factor=0.5)
+                print(f"[Debug] Generated hard negatives: {generated_hard_negatives.shape}")
+                verify_hard_negatives(inputs_negative.shape, generated_hard_negatives.shape)
+            except Exception as e:
+                print(f"[Error] Hard negatives generation failed: {e}")
+                continue
+
+            # 모델 입력 디버그 및 Projections 생성
+            try:
+                proj_anchor, proj_positive, proj_negative = model(inputs_anchor, inputs_positive, inputs_negative)
+                if proj_negative is None:
+                    print("[Error] proj_negative is None. Skipping batch.")
+                    continue
+                print(f"[Debug] Projections shapes: Anchor: {proj_anchor.shape}, Positive: {proj_positive.shape}, Negative: {proj_negative.shape}")
+            except Exception as e:
+                print(f"[Error] Model projection failed: {e}")
+                continue
+
+            # Hard negatives와 Projections 검증
+            try:
+                verify_hard_negatives(inputs_negative.shape, proj_negative.shape, is_projection=True)
+            except Exception as e:
+                print(f"[Error] Hard negatives verification failed: {e}")
+                continue
+
+            # 학습
+            optimizer.zero_grad()
+            with torch.cuda.amp.autocast():
+                loss = model.compute_loss(proj_anchor, proj_positive, proj_negative)
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
+            running_loss += loss.item()
+
+            # 배치별 SRCC, PLCC 계산
+            srocc, plcc = calculate_srcc_plcc(proj_anchor, proj_positive)
+            print(f"Batch SRCC: {srocc:.4f}, PLCC: {plcc:.4f}")
+
+            progress_bar.set_postfix(loss=running_loss / len(train_dataloader))
+
+        lr_scheduler.step()
+
+        # 검증 단계
+        avg_srocc_val, avg_plcc_val = validate(args, model, val_dataloader, device)
+        print(f"Epoch {epoch + 1} Validation Results: SRCC = {avg_srocc_val:.4f}, PLCC = {avg_plcc_val:.4f}")
+
+        if avg_srocc_val > best_srocc:
+            best_srocc = avg_srocc_val
+            save_checkpoint(model, checkpoint_path, epoch, best_srocc)
+
+    print("Training Complete.")
+
+
+# 검증 함수
+def validate(args, model, val_dataloader, device):
+    model.eval()
+    srocc_list, plcc_list = [], []
+    with torch.no_grad():
+        for batch in val_dataloader:
+            inputs_anchor = batch["img_anchor"].to(device)
+            inputs_positive = batch["img_positive"].to(device)
+
+            proj_anchor, proj_positive, proj_negative = model(inputs_anchor, inputs_positive, inputs_positive)
+
+            # 배치별 SRCC, PLCC 계산
+            srocc, plcc = calculate_srcc_plcc(proj_anchor, proj_positive)
+            print(f"Validation Batch SRCC: {srocc:.4f}, PLCC: {plcc:.4f}")
+
+            srocc_list.append(srocc)
+            plcc_list.append(plcc)
+
+    return np.mean(srocc_list), np.mean(plcc_list)
+
+# Ridge 최적화
+def optimize_ridge_alpha(embeddings, mos_scores):
+    param_grid = {'alpha': [0.01, 0.1, 1.0, 10.0, 100.0]}
+    ridge = Ridge()
+    grid = GridSearchCV(ridge, param_grid, scoring='r2', cv=5)
+    grid.fit(embeddings, mos_scores)
+    best_alpha = grid.best_params_['alpha']
+    print(f"Optimal alpha: {best_alpha}")
+    return Ridge(alpha=best_alpha).fit(embeddings, mos_scores)
+
+
+# 데이터셋 분리
+def get_split_indices(dataset, train_ratio=0.7, val_ratio=0.1, test_ratio=0.2):
+    dataset_size = len(dataset)
+    train_size = int(train_ratio * dataset_size)
+    val_size = int(val_ratio * dataset_size)
+    test_size = dataset_size - train_size - val_size
+    return train_size, val_size, test_size
+
+
+# 메인 함수
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, required=True, help='Configuration file')
+    args, _ = parser.parse_known_args()
+    config = parse_config(args.config)
+
+    args.__dict__.update(config)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    dataset = KADID10KDataset("E:/ARNIQA_Enhanced-Hard-Negative-Attention/dataset/KADID10K/kadid10k.csv")
+    train_size, val_size, test_size = get_split_indices(dataset)
+    train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size])
+
+    train_dataloader = DataLoader(train_dataset, batch_size=args.training.batch_size, shuffle=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=args.training.batch_size, shuffle=False)
+    test_dataloader = DataLoader(test_dataset, batch_size=args.training.batch_size, shuffle=False)
+
+    model = SimCLR(encoder_params=args.model.encoder).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.training.learning_rate)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.training.step_size, gamma=args.training.gamma)
     scaler = torch.cuda.amp.GradScaler()
 
-    # 학습 수행
-    train(args, model, train_dataloader, val_dataloader, test_dataloader, optimizer, lr_scheduler, scaler, device)
+    train(args, model, train_dataloader, val_dataloader, optimizer, lr_scheduler, scaler, device)
 
-    # 테스트 데이터셋 평가
-    print("Evaluating on the test dataset...")
-    test(args, model, test_dataloader, device)
+    regressor = train_ridge_regressor(model, train_dataloader, device)
+    mos_scores, predictions = evaluate_ridge_regressor(regressor, model, test_dataloader, device)
 
+    srcc, plcc = calculate_srcc_plcc(torch.tensor(mos_scores), torch.tensor(predictions))
+    print(f"Final Test Results: SRCC = {srcc:.4f}, PLCC = {plcc:.4f}")
+    plot_results(mos_scores, predictions)
 
 
 # TID2013
