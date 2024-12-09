@@ -118,7 +118,6 @@ import torch.nn as nn
 import torchvision
 from torchvision.models import resnet50
 
-
 class ResNet(nn.Module):
     def __init__(self, embedding_dim: int = 128, pretrained: bool = True, use_norm: bool = True):
         super(ResNet, self).__init__()
@@ -149,4 +148,5 @@ class ResNet(nn.Module):
         if self.use_norm:
             projection = nn.functional.normalize(projection, dim=1)
 
+        print(f"[Debug] ResNet features shape: {features.shape}, projection shape: {projection.shape}")
         return features, projection

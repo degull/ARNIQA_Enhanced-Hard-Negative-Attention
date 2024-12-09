@@ -259,14 +259,22 @@ def verify_hard_negatives(original_shape, downscaled_shape, scale_factor=0.5, is
         print("[Hard Negative Verification] Error: 잘못된 입력 형식입니다.")
 
 
-
 # 양성 쌍 검증 함수
-def verify_positive_pairs(distortions_A, distortions_B):
-    print(f"[Debug] Distortion_A: {distortions_A}, Distortion_B: {distortions_B}")
+# 양성 쌍 검증 함수 수정
+def verify_positive_pairs(distortions_A, distortions_B, image_A, image_B):
+    # 왜곡 유형 비교
     if distortions_A == distortions_B:
-        print("[Positive Pair Verification] Success: Distortions match.")
+        print("[Positive Pair Verification] Success: Same distortion types.")
     else:
         print("[Positive Pair Verification] Error: Distortions do not match.")
+
+def verify_negative_pairs(image_A, image_B, distortions_A, distortions_B):
+    # 해상도나 크기가 다른 이미지 비교
+    if image_A.size != image_B.size:
+        print("[Negative Pair Verification] Success: Different image sizes, valid negative pair.")
+    else:
+        print("[Negative Pair Verification] Error: Images have the same size, not a valid negative pair.")
+
 
 
 # 모델 체크포인트 저장 함수
@@ -329,7 +337,6 @@ def evaluate_ridge_regressor(regressor, model, test_dataloader, device):
     return mos_scores, predictions
 
 
-
 # 플로팅 함수
 def plot_results(true_scores, predicted_scores, title="Regression Results"):
     plt.figure(figsize=(8, 6))
@@ -360,14 +367,16 @@ def train(args, model, train_dataloader, val_dataloader, optimizer, lr_scheduler
             inputs_positive = batch["img_positive"].to(device)
             inputs_negative = batch["img_negative"].to(device)
 
-            # Hard negatives 생성
-            try:
-                generated_hard_negatives = generate_hard_negatives(inputs_negative, scale_factor=0.5)
-                print(f"[Debug] Generated hard negatives: {generated_hard_negatives.shape}")
-                verify_hard_negatives(inputs_negative.shape, generated_hard_negatives.shape)
-            except Exception as e:
-                print(f"[Error] Hard negatives generation failed: {e}")
-                continue
+            # 양성 및 음성 쌍 확인
+            print(f"[Debug] Distortion Type of Anchor: {batch['distortion_type'][0]}")
+            print(f"[Debug] Distortion Type of Positive: {batch['distortion_type'][1]}")
+            print(f"[Debug] Distortion Type of Negative: {batch['distortion_type'][2]}")
+
+            # 양성 쌍 검증
+            verify_positive_pairs(batch['distortion_type'][:2], batch['distortion_type'][:2], batch['img_anchor'], batch['img_positive'])
+
+            # 음성 쌍 검증
+            verify_negative_pairs(batch['img_anchor'], batch['img_negative'], batch['distortion_type'][:2], batch['distortion_type'][1:])  # 첫 번째와 세 번째 이미지 비교 (음성 쌍)
 
             # 모델 입력 디버그 및 Projections 생성
             try:
@@ -488,7 +497,6 @@ if __name__ == "__main__":
     srcc, plcc = calculate_srcc_plcc(torch.tensor(mos_scores), torch.tensor(predictions))
     print(f"Final Test Results: SRCC = {srcc:.4f}, PLCC = {plcc:.4f}")
     plot_results(mos_scores, predictions)
-
 
 # TID2013
 

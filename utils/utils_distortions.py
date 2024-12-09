@@ -5,43 +5,31 @@ import torch
 from torch.nn import functional as F
 import scipy
 import torch.nn as nn
-
 import torch.nn.functional as F
 
+
+import torch
+import torch.nn.functional as F
 
 def generate_hard_negatives(images, scale_factor=0.5):
     """
     Hard negatives를 생성합니다. 입력 이미지를 주어진 scale_factor로 다운스케일합니다.
-    
-    Args:
-        images (torch.Tensor): 배치 형태의 입력 이미지 (B, C, H, W).
-        scale_factor (float): 다운스케일 비율 (예: 0.5는 50%로 축소).
-    
-    Returns:
-        torch.Tensor: 다운스케일된 이미지 텐서.
     """
-    # 디버그: 입력 크기 확인
-    print(f"[Debug] Original images shape: {images.shape}")
+    print(f"[Debug] Input images shape: {images.shape}")
+    print(f"[Debug] Input images min: {images.min()}, max: {images.max()}")
 
     if len(images.shape) != 4:
         raise ValueError(f"Invalid input shape for images: {images.shape}. Expected 4D tensor.")
-
-    # 이미지 크기 축소
+    
     batch_size, channels, height, width = images.shape
     new_height, new_width = int(height * scale_factor), int(width * scale_factor)
 
-    # 다운스케일 처리
-    try:
-        hard_negatives = torch.nn.functional.interpolate(
-            images, size=(new_height, new_width), mode='bilinear', align_corners=False
-        )
-        # 디버그: 출력 크기 확인
-        print(f"[Debug] Generated hard negatives shape: {hard_negatives.shape}")
-        return hard_negatives
-    except Exception as e:
-        print(f"[Error] Failed to generate hard negatives: {e}")
-        raise
+    hard_negatives = F.interpolate(images, size=(new_height, new_width), mode='bilinear', align_corners=False)
+    
+    print(f"[Debug] Hard negatives shape: {hard_negatives.shape}")
+    print(f"[Debug] Hard negatives min: {hard_negatives.min()}, max: {hard_negatives.max()}")
 
+    return hard_negatives
 
 
 
@@ -360,6 +348,3 @@ def bilinear_interpolate_torch(im: torch.Tensor, x: torch.Tensor, y: torch.Tenso
     P = R1 * (y1 - y) / (y1 - y0 + eps) + R2 * (y - y0) / (y1 - y0 + eps)
     return P
 
-
-
-""" 왜곡 적용하는 코드 """
