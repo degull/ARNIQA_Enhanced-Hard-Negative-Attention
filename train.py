@@ -469,7 +469,6 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 import numpy as np
-from dotmap import DotMap
 from pathlib import Path
 from tqdm import tqdm
 from scipy import stats
@@ -478,11 +477,12 @@ from data import KADID10KDataset
 from utils.utils import parse_config
 from models.simclr import SimCLR
 import matplotlib.pyplot as plt
-import argparse
 from sklearn.model_selection import GridSearchCV
-from utils.utils_distortions import generate_hard_negatives
 from sklearn.preprocessing import StandardScaler
+import torch.nn.functional as F
 
+
+# Hard Negative 검증 함수
 def verify_hard_negatives(original_shape, downscaled_shape, scale_factor=0.5, is_projection=False):
     if is_projection:
         print(f"[Debug] Projection 검증: {downscaled_shape}")
@@ -497,7 +497,6 @@ def verify_hard_negatives(original_shape, downscaled_shape, scale_factor=0.5, is
         expected_height = int(original_shape[-2] * scale_factor)
         expected_width = int(original_shape[-1] * scale_factor)
 
-        # 실제 크기와 예상 크기를 비교
         if downscaled_shape[-2] == expected_height and downscaled_shape[-1] == expected_width:
             print("[Hard Negative Verification] Success: Hard negatives가 올바르게 다운스케일되었습니다.")
         else:
@@ -505,6 +504,23 @@ def verify_hard_negatives(original_shape, downscaled_shape, scale_factor=0.5, is
             print(f"예상 크기: ({expected_height}, {expected_width}), 실제 크기: {downscaled_shape[-2:]}")
     else:
         print("[Hard Negative Verification] Error: 잘못된 입력 형식입니다.")
+
+
+# 양성 쌍 검증 함수
+def verify_positive_pairs(distortions_A, distortions_B, image_A, image_B):
+    if distortions_A == distortions_B:
+        print(f"[Positive Pair Verification] Success: Same distortion types. Distortion: {distortions_A}")
+    else:
+        print(f"[Positive Pair Verification] Error: Distortions do not match. Distortion A: {distortions_A}, Distortion B: {distortions_B}")
+
+
+# 음성 쌍 검증 함수
+def verify_negative_pairs(image_A, image_B, distortions_A, distortions_B):
+    if image_A.size != image_B.size:
+        print("[Negative Pair Verification] Success: Different image sizes, valid negative pair.")
+    else:
+        print("[Negative Pair Verification] Error: Images have the same size, not a valid negative pair.")
+
 
 # Ridge Regressor 최적화
 def optimize_ridge_alpha(embeddings, mos_scores):
@@ -516,33 +532,6 @@ def optimize_ridge_alpha(embeddings, mos_scores):
     print(f"Optimal alpha: {best_alpha}")
     return Ridge(alpha=best_alpha).fit(embeddings, mos_scores)
 
-# 양성 쌍 검증 함수
-def verify_positive_pairs(distortions_A, distortions_B, image_A, image_B):
-    if distortions_A == distortions_B:
-        print("[Positive Pair Verification] Success: Same distortion types.")
-    else:
-        print("[Positive Pair Verification] Error: Distortions do not match.")
-
-# 음성 쌍 검증 함수
-def verify_negative_pairs(image_A, image_B, distortions_A, distortions_B):
-    if image_A.size != image_B.size:
-        print("[Negative Pair Verification] Success: Different image sizes, valid negative pair.")
-    else:
-        print("[Negative Pair Verification] Error: Images have the same size, not a valid negative pair.")
-
-# 모델 체크포인트 저장 함수
-def save_checkpoint(model: nn.Module, checkpoint_path: Path, epoch: int, srocc: float) -> None:
-    filename = f"epoch_{epoch}_srocc_{srocc:.3f}.pth"
-    torch.save(model.state_dict(), checkpoint_path / filename)
-    print(f"Checkpoint saved: {checkpoint_path / filename}")
-
-# SRCC와 PLCC 계산 함수
-def calculate_srcc_plcc(proj_A, proj_B):
-    proj_A = proj_A.detach().cpu().numpy()
-    proj_B = proj_B.detach().cpu().numpy()
-    srocc, _ = stats.spearmanr(proj_A.flatten(), proj_B.flatten())
-    plcc, _ = stats.pearsonr(proj_A.flatten(), proj_B.flatten())
-    return srocc, plcc
 
 # Ridge Regressor 학습 함수
 def train_ridge_regressor(model, train_dataloader, device):
@@ -561,12 +550,12 @@ def train_ridge_regressor(model, train_dataloader, device):
     embeddings = np.vstack(embeddings)
     mos_scores = np.hstack(mos_scores)
 
-    # Normalize embeddings
     scaler = StandardScaler()
     embeddings = scaler.fit_transform(embeddings)
 
     regressor = optimize_ridge_alpha(embeddings, mos_scores)
     return regressor
+
 
 # Ridge Regressor 평가 함수
 def evaluate_ridge_regressor(regressor, model, test_dataloader, device):
@@ -586,69 +575,53 @@ def evaluate_ridge_regressor(regressor, model, test_dataloader, device):
 
     mos_scores = np.hstack(mos_scores)
     predictions = np.hstack(predictions)
+
+    plt.figure(figsize=(8, 6))
+    plt.scatter(mos_scores, predictions, alpha=0.5, label='Predictions vs MOS')
+    plt.plot([min(mos_scores), max(mos_scores)], [min(mos_scores), max(mos_scores)], 'r--', label='Ideal Fit')
+    plt.xlabel('Actual MOS')
+    plt.ylabel('Predicted MOS')
+    plt.title('Ridge Regressor Performance')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
     return mos_scores, predictions
 
-# 플로팅 함수
-def plot_results(train_metrics, val_metrics, test_metrics):
-    epochs = range(1, len(train_metrics['srcc']) + 1)
 
-    # Plot SRCC
-    plt.figure(figsize=(10, 5))
-    plt.plot(epochs, train_metrics['srcc'], label='Train SRCC')
-    plt.plot(epochs, val_metrics['srcc'], label='Validation SRCC')
-    plt.plot(epochs, test_metrics['srcc'], label='Test SRCC')
-    plt.xlabel('Epochs')
-    plt.ylabel('SRCC')
-    plt.title('SRCC over Epochs')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
+# SRCC와 PLCC 계산 함수
+def calculate_srcc_plcc(proj_A, proj_B):
+    proj_A = proj_A.detach().cpu().numpy()
+    proj_B = proj_B.detach().cpu().numpy()
+    srocc, _ = stats.spearmanr(proj_A.flatten(), proj_B.flatten())
+    plcc, _ = stats.pearsonr(proj_A.flatten(), proj_B.flatten())
+    return srocc, plcc
 
-    # Plot PLCC
-    plt.figure(figsize=(10, 5))
-    plt.plot(epochs, train_metrics['plcc'], label='Train PLCC')
-    plt.plot(epochs, val_metrics['plcc'], label='Validation PLCC')
-    plt.plot(epochs, test_metrics['plcc'], label='Test PLCC')
-    plt.xlabel('Epochs')
-    plt.ylabel('PLCC')
-    plt.title('PLCC over Epochs')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
 
+# 학습 함수
 # 학습 함수
 def train(args, model, train_dataloader, val_dataloader, test_dataloader, optimizer, lr_scheduler, scaler, device):
     checkpoint_path = Path(args.checkpoint_base_path) / "am_kadid"
     checkpoint_path.mkdir(parents=True, exist_ok=True)
 
     best_srocc = 0
-    train_metrics = {'srcc': [], 'plcc': []}
-    val_metrics = {'srcc': [], 'plcc': []}
-    test_metrics = {'srcc': [], 'plcc': []}
-
     for epoch in range(args.training.epochs):
         model.train()
         running_loss = 0.0
+        batch_srcc, batch_plcc = [], []
 
         progress_bar = tqdm(train_dataloader, desc=f"Epoch [{epoch + 1}/{args.training.epochs}]")
-
-        for batch in progress_bar:
+        for batch_idx, batch in enumerate(progress_bar):
             inputs_anchor = batch["img_anchor"].to(device)
             inputs_positive = batch["img_positive"].to(device)
             inputs_negative = batch["img_negative"].to(device)
 
-            # Hard negatives 검증
             verify_hard_negatives(inputs_anchor.shape, inputs_negative.shape)
-
-            # 양성 및 음성 쌍 검증
             verify_positive_pairs(batch['distortion_type'][:2], batch['distortion_type'][:2], batch['img_anchor'], batch['img_positive'])
             verify_negative_pairs(batch['img_anchor'], batch['img_negative'], batch['distortion_type'][:2], batch['distortion_type'][2:])
 
             try:
                 proj_anchor, proj_positive, proj_negative = model(inputs_anchor, inputs_positive, inputs_negative)
-                if proj_negative is None:
-                    print("[Error] proj_negative is None. Skipping batch.")
-                    continue
             except Exception as e:
                 print(f"[Error] Model projection failed: {e}")
                 continue
@@ -662,38 +635,31 @@ def train(args, model, train_dataloader, val_dataloader, test_dataloader, optimi
             scaler.update()
 
             running_loss += loss.item()
-
-            # SRCC, PLCC 계산 후 출력
             srocc, plcc = calculate_srcc_plcc(proj_anchor, proj_positive)
-            progress_bar.set_postfix(loss=running_loss / len(train_dataloader), SRCC=srocc, PLCC=plcc)
+            batch_srcc.append(srocc)
+            batch_plcc.append(plcc)
 
-            # Store batch metrics
-            train_metrics['srcc'].append(srocc)
-            train_metrics['plcc'].append(plcc)
+            # 배치별 SRCC/PLCC 출력
+            print(f"Batch {batch_idx + 1}: SRCC = {srocc:.4f}, PLCC = {plcc:.4f}")
 
-        lr_scheduler.step()
+        avg_srcc = np.mean(batch_srcc)
+        avg_plcc = np.mean(batch_plcc)
+        print(f"Epoch {epoch + 1} Train SRCC: {avg_srcc:.4f}, PLCC: {avg_plcc:.4f}")
 
-        # Validation and Test Metrics
         avg_srocc_val, avg_plcc_val = validate(model, val_dataloader, device)
         avg_srocc_test, avg_plcc_test = validate(model, test_dataloader, device)
 
-        val_metrics['srcc'].append(avg_srocc_val)
-        val_metrics['plcc'].append(avg_plcc_val)
-        test_metrics['srcc'].append(avg_srocc_test)
-        test_metrics['plcc'].append(avg_plcc_test)
-
-        print(f"Epoch {epoch + 1} Validation Results: SRCC = {avg_srocc_val:.4f}, PLCC = {avg_plcc_val:.4f}")
-        print(f"Epoch {epoch + 1} Test Results: SRCC = {avg_srocc_test:.4f}, PLCC = {avg_plcc_test:.4f}")
+        print(f"Epoch {epoch + 1} Validation SRCC: {avg_srocc_val:.4f}, PLCC: {avg_plcc_val:.4f}")
+        print(f"Epoch {epoch + 1} Test SRCC: {avg_srocc_test:.4f}, PLCC: {avg_plcc_test:.4f}")
 
         if avg_srocc_val > best_srocc:
             best_srocc = avg_srocc_val
             save_checkpoint(model, checkpoint_path, epoch, best_srocc)
 
     print("Training Complete.")
+    
 
-    # After training, plot the results
-    plot_results(train_metrics, val_metrics, test_metrics)
-
+# 검증 함수
 def validate(model, dataloader, device):
     model.eval()
     srocc_list, plcc_list = [], []
@@ -703,12 +669,12 @@ def validate(model, dataloader, device):
             inputs_positive = batch["img_positive"].to(device)
 
             proj_anchor, proj_positive, _ = model(inputs_anchor, inputs_positive, inputs_positive)
-
             srocc, plcc = calculate_srcc_plcc(proj_anchor, proj_positive)
             srocc_list.append(srocc)
             plcc_list.append(plcc)
 
     return np.mean(srocc_list), np.mean(plcc_list)
+
 
 # 데이터셋 분리 함수
 def get_split_indices(dataset, train_ratio=0.7, val_ratio=0.1, test_ratio=0.2):
@@ -720,6 +686,7 @@ def get_split_indices(dataset, train_ratio=0.7, val_ratio=0.1, test_ratio=0.2):
 
 
 if __name__ == "__main__":
+    import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True, help='Configuration file')
     args, _ = parser.parse_known_args()
@@ -748,6 +715,7 @@ if __name__ == "__main__":
 
     srcc, plcc = calculate_srcc_plcc(torch.tensor(mos_scores), torch.tensor(predictions))
     print(f"Final Test Results: SRCC = {srcc:.4f}, PLCC = {plcc:.4f}")
+
     plot_results(mos_scores, predictions)
 
 
