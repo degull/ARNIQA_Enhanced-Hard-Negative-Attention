@@ -11,27 +11,37 @@ import torch.nn.functional as F
 import torch
 import torch.nn.functional as F
 
+# 하드 네거티브 생성 함수 수정
 def generate_hard_negatives(images, scale_factor=0.5):
     """
-    Hard negatives를 생성합니다. 입력 이미지를 주어진 scale_factor로 다운스케일합니다.
+    하드 네거티브를 생성합니다. 입력 이미지를 주어진 scale_factor로 다운스케일합니다.
     """
-    print(f"[Debug] Input images shape: {images.shape}")
-    print(f"[Debug] Input images min: {images.min()}, max: {images.max()}")
-
     if len(images.shape) != 4:
         raise ValueError(f"Invalid input shape for images: {images.shape}. Expected 4D tensor.")
     
     batch_size, channels, height, width = images.shape
-    new_height, new_width = int(height * scale_factor), int(width * scale_factor)
+    new_height = int(height * scale_factor)  # scale_factor를 적용해 새로운 높이 계산
+    new_width = int(width * scale_factor)    # scale_factor를 적용해 새로운 너비 계산
 
+    print(f"[Debug] Original size: ({height}, {width}), Downscaled size: ({new_height}, {new_width})")
+
+    # 다운샘플링
     hard_negatives = F.interpolate(images, size=(new_height, new_width), mode='bilinear', align_corners=False)
     
-    print(f"[Debug] Hard negatives shape: {hard_negatives.shape}")
-    print(f"[Debug] Hard negatives min: {hard_negatives.min()}, max: {hard_negatives.max()}")
-
     return hard_negatives
 
-
+# 이미지 전처리 및 데이터 증강
+def image_preprocessing_and_augmentation(image_path):
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),  # Ensure the image is resized to 224x224 before any augmentation
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(30),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    image = Image.open(image_path)
+    return transform(image)
 
 def sign(x: float) -> int:
     return 1 if x >= 0 else -1

@@ -17,7 +17,7 @@ checkpoint_frequency: 1  # 에폭마다 체크포인트 저장
 
 # Training
 training:
-  epochs: 1    # 학습할 에폭 수
+  epochs: 5    # 학습할 에폭 수
   learning_rate: !!float 1e-3    # 학습률 추가
   batch_size: 16     # 배치 크기
   lr: !!float 1e-3

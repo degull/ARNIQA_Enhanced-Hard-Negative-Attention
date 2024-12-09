@@ -450,6 +450,13 @@ from models.attention_module import DistortionAttention, HardNegativeCrossAttent
 from models.resnet import ResNet
 
 
+import torch
+import torch.nn as nn
+from models.attention_module import DistortionAttention, HardNegativeCrossAttention
+from models.resnet import ResNet
+from utils.nt_xent_loss import NT_Xent_Loss  # NT-Xent Loss 임포트
+
+
 class SimCLR(nn.Module):
     def __init__(self, encoder_params, temperature: float = 0.1, margin: float = 1.0):
         super(SimCLR, self).__init__()
@@ -466,7 +473,7 @@ class SimCLR(nn.Module):
         self.self_attention = DistortionAttention(embed_dim=encoder_params.embedding_dim, num_heads=8)
         self.cross_attention = HardNegativeCrossAttention(embed_dim=encoder_params.embedding_dim, num_heads=8)
         self.temperature = temperature
-        self.triplet_loss = nn.TripletMarginLoss(margin=margin)
+        self.nt_xent_loss = NT_Xent_Loss(temperature=temperature)  # NT-Xent Loss 사용
         self._initialize_weights()
 
     def _initialize_weights(self):
@@ -488,7 +495,6 @@ class SimCLR(nn.Module):
         # Self-Attention
         anchor_proj = self.self_attention(self.projector(anchor_features).unsqueeze(1)).squeeze(1)
         positive_proj = self.self_attention(self.projector(positive_features).unsqueeze(1)).squeeze(1)
-        print(f"[Debug] Anchor projection shape: {anchor_proj.shape}, Positive projection shape: {positive_proj.shape}")
 
         # Cross-Attention
         if negative_features is None:
@@ -498,14 +504,14 @@ class SimCLR(nn.Module):
             self.projector(anchor_features),
             self.projector(negative_features)
         )
-        print(f"[Debug] Negative projection shape: {negative_proj.shape}")
 
         return anchor_proj, positive_proj, negative_proj
 
     def compute_loss(self, anchor, positive, negative):
         if anchor is None or positive is None or negative is None:
             raise ValueError("[Error] One or more inputs to compute_loss are None.")
-        return self.triplet_loss(anchor, positive, negative)
+        return self.nt_xent_loss(anchor, positive)  # NT-Xent Loss 계산
+
 
 
 

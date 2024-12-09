@@ -213,10 +213,11 @@ class KADID10KDataset(Dataset):
             self.distortion_types = self.distortion_types[split_idxs]
             self.distortion_levels = self.distortion_levels[split_idxs]
 
-    def transform(self, image: Image) -> torch.Tensor:
-        # Transform image to desired size and convert to tensor
+    def transform(self, image: Image, size: tuple = None) -> torch.Tensor:
+        # 기본 크기 설정
+        size = size or (self.crop_size, self.crop_size)
         return transforms.Compose([
-            transforms.Resize((self.crop_size, self.crop_size)),
+            transforms.Resize(size),
             transforms.ToTensor(),
         ])(image)
     
@@ -247,7 +248,8 @@ class KADID10KDataset(Dataset):
 
         img_anchor = self.transform(img_anchor)
         img_positive = self.transform(img_positive)
-        img_negative = self.transform(img_negative)
+        # Hard Negative는 예상 크기로 리사이즈
+        img_negative = self.transform(img_negative, size=(112, 112))
 
         # Distortion 추가
         img_anchor = self.apply_distortion(img_anchor)
