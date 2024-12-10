@@ -482,6 +482,7 @@ import argparse
 from sklearn.model_selection import GridSearchCV
 from utils.utils_distortions import generate_hard_negatives
 from sklearn.preprocessing import StandardScaler
+import seaborn as sns
 
 def verify_hard_negatives(original_shape, downscaled_shape, scale_factor=0.5, is_projection=False):
     if is_projection:
@@ -506,15 +507,7 @@ def verify_hard_negatives(original_shape, downscaled_shape, scale_factor=0.5, is
     else:
         print("[Hard Negative Verification] Error: 잘못된 입력 형식입니다.")
 
-# Ridge Regressor 최적화
-def optimize_ridge_alpha(embeddings, mos_scores):
-    param_grid = {'alpha': [0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]}
-    ridge = Ridge()
-    grid = GridSearchCV(ridge, param_grid, scoring='r2', cv=5)
-    grid.fit(embeddings, mos_scores)
-    best_alpha = grid.best_params_['alpha']
-    print(f"Optimal alpha: {best_alpha}")
-    return Ridge(alpha=best_alpha).fit(embeddings, mos_scores)
+
 
 # 양성 쌍 검증 함수
 def verify_positive_pairs(distortions_A, distortions_B, image_A, image_B):
@@ -536,16 +529,65 @@ def save_checkpoint(model: nn.Module, checkpoint_path: Path, epoch: int, srocc: 
     torch.save(model.state_dict(), checkpoint_path / filename)
     print(f"Checkpoint saved: {checkpoint_path / filename}")
 
-# SRCC와 PLCC 계산 함수
-def calculate_srcc_plcc(proj_A, proj_B):
-    proj_A = proj_A.detach().cpu().numpy()
-    proj_B = proj_B.detach().cpu().numpy()
-    srocc, _ = stats.spearmanr(proj_A.flatten(), proj_B.flatten())
-    plcc, _ = stats.pearsonr(proj_A.flatten(), proj_B.flatten())
-    return srocc, plcc
+
+def normalize_projection(projection):
+    """Normalize the projection to improve Ridge Regressor performance."""
+    normalized_projection = projection / (np.linalg.norm(projection, axis=1, keepdims=True) + 1e-8)
+    return normalized_projection
+
+
+def improve_negative_sampling(anchor, negative, similarity_threshold=0.4):
+    new_negative = []
+    for i, (anchor_sample, neg_sample) in enumerate(zip(anchor, negative)):
+        similarity = torch.nn.functional.cosine_similarity(
+            anchor_sample.unsqueeze(0), neg_sample.unsqueeze(0)
+        ).item()
+
+        if similarity > similarity_threshold:
+            print(f"[Debug] Initial Similarity ({i}): {similarity:.4f}")
+        while similarity > similarity_threshold:
+            neg_sample = neg_sample + torch.randn_like(neg_sample) * 0.1  # Random noise 추가
+            similarity = torch.nn.functional.cosine_similarity(
+                anchor_sample.unsqueeze(0), neg_sample.unsqueeze(0)
+            ).item()
+            print(f"[Debug] Updated Similarity ({i}): {similarity:.4f}")
+
+        new_negative.append(neg_sample)
+    return torch.stack(new_negative)
+
+
+# Ridge Regressor 최적화
+def optimize_ridge_alpha(embeddings, mos_scores):
+    """Optimize Ridge Regressor using expanded GridSearchCV alpha space."""
+    param_grid = {'alpha': [0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 5000.0, 10000.0]}
+    ridge = Ridge()
+    grid = GridSearchCV(ridge, param_grid, scoring='r2', cv=10)  # Increase CV folds to 10
+    grid.fit(embeddings, mos_scores)
+    best_alpha = grid.best_params_['alpha']
+    print(f"[Debug] Optimal alpha: {best_alpha}")
+    return Ridge(alpha=best_alpha).fit(embeddings, mos_scores)
+
+def process_projections(anchor_proj, positive_proj, negative_proj):
+    # Normalize projections
+    anchor_proj = torch.nn.functional.normalize(anchor_proj, p=2, dim=1)
+    positive_proj = torch.nn.functional.normalize(positive_proj, p=2, dim=1)
+    negative_proj = torch.nn.functional.normalize(negative_proj, p=2, dim=1)
+
+    # Debugging statistics
+    print(f"[Debug] Anchor Mean={anchor_proj.mean().item():.4f}, Std={anchor_proj.std().item():.4f}")
+    print(f"[Debug] Positive Mean={positive_proj.mean().item():.4f}, Std={positive_proj.std().item():.4f}")
+    print(f"[Debug] Negative Mean={negative_proj.mean().item():.4f}, Std={negative_proj.std().item():.4f}")
+
+    # Improve Negative Sampling
+    negative_proj = improve_negative_sampling(anchor_proj, negative_proj)
+
+    return anchor_proj, positive_proj, negative_proj
+
+
 
 # Ridge Regressor 학습 함수
 def train_ridge_regressor(model, train_dataloader, device):
+    """Train Ridge Regressor with improved negative sampling and normalized projections."""
     model.eval()
     embeddings, mos_scores = [], []
 
@@ -554,22 +596,28 @@ def train_ridge_regressor(model, train_dataloader, device):
             inputs = batch["img_anchor"].to(device)
             mos = batch["mos"]
 
-            proj, _, _ = model(inputs, inputs, inputs)
-            embeddings.append(proj.cpu().numpy())
+            anchor_proj, positive_proj, negative_proj = model(inputs, inputs, inputs)
+
+            # Process projections (PyTorch 텐서를 사용)
+            anchor_proj, positive_proj, negative_proj = process_projections(anchor_proj, positive_proj, negative_proj)
+
+            embeddings.append(anchor_proj.cpu().numpy())
             mos_scores.append(mos.cpu().numpy())
 
     embeddings = np.vstack(embeddings)
     mos_scores = np.hstack(mos_scores)
 
-    # Normalize embeddings
+    # Standardize embeddings
     scaler = StandardScaler()
     embeddings = scaler.fit_transform(embeddings)
 
+    # Optimize Ridge Regressor
     regressor = optimize_ridge_alpha(embeddings, mos_scores)
     return regressor
 
 # Ridge Regressor 평가 함수
 def evaluate_ridge_regressor(regressor, model, test_dataloader, device):
+    """Evaluate Ridge Regressor with improved projections."""
     model.eval()
     mos_scores, predictions = [], []
 
@@ -578,8 +626,15 @@ def evaluate_ridge_regressor(regressor, model, test_dataloader, device):
             inputs = batch["img_anchor"].to(device)
             mos = batch["mos"]
 
-            proj, _, _ = model(inputs, inputs, inputs)
-            prediction = regressor.predict(proj.cpu().numpy())
+            # Generate projections
+            anchor_proj, positive_proj, negative_proj = model(inputs, inputs, inputs)
+
+            # Process projections (텐서 형태 유지)
+            anchor_proj, _, _ = process_projections(anchor_proj, positive_proj, negative_proj)
+
+            # Convert to numpy for regressor
+            anchor_proj = anchor_proj.cpu().numpy()
+            prediction = regressor.predict(anchor_proj)
 
             mos_scores.append(mos.cpu().numpy())
             predictions.append(prediction)
@@ -588,17 +643,38 @@ def evaluate_ridge_regressor(regressor, model, test_dataloader, device):
     predictions = np.hstack(predictions)
     return mos_scores, predictions
 
+
+
 # Ridge Regressor 결과를 시각화하는 함수
-def plot_results(mos_scores, predictions, title="Ridge Regressor Results"):
+def plot_results(mos_scores, predictions, title="Improved Ridge Regressor Results"):
+    """Plot the results of Ridge Regressor with improved negative sampling and normalization."""
     plt.figure(figsize=(8, 6))
     plt.scatter(mos_scores, predictions, alpha=0.5, label="Predicted vs Actual")
-    plt.plot([min(mos_scores), max(mos_scores)], [min(mos_scores), max(mos_scores)], color="red", linestyle="--", label="Ideal Fit")
+    plt.plot([min(mos_scores), max(mos_scores)], [min(mos_scores), max(mos_scores)],
+             color="red", linestyle="--", label="Ideal Fit")
     plt.title(title)
     plt.xlabel("Actual MOS")
     plt.ylabel("Predicted MOS")
     plt.legend()
     plt.grid(True)
     plt.show()
+
+# Embedding 시각화
+def visualize_embeddings(embeddings, mos_scores):
+    sns.scatterplot(x=embeddings[:, 0], y=embeddings[:, 1], hue=mos_scores, palette='viridis')
+    plt.title("Embedding Visualization")
+    plt.xlabel("Projection Dim 1")
+    plt.ylabel("Projection Dim 2")
+    plt.colorbar(label="MOS")
+    plt.show()
+
+# SRCC와 PLCC 계산 함수
+def calculate_srcc_plcc(proj_A, proj_B):
+    proj_A = proj_A.detach().cpu().numpy()
+    proj_B = proj_B.detach().cpu().numpy()
+    srocc = stats.spearmanr(proj_A.flatten(), proj_B.flatten())[0]
+    plcc = stats.pearsonr(proj_A.flatten(), proj_B.flatten())[0]
+    return srocc, plcc
 
 # 학습 함수
 def train(args, model, train_dataloader, val_dataloader, test_dataloader, optimizer, lr_scheduler, scaler, device):
@@ -678,7 +754,6 @@ def train(args, model, train_dataloader, val_dataloader, test_dataloader, optimi
 
     return train_metrics, val_metrics, test_metrics
 
-
 def validate(model, dataloader, device):
     model.eval()
     srocc_list, plcc_list = [], []
@@ -688,7 +763,6 @@ def validate(model, dataloader, device):
             inputs_positive = batch["img_positive"].to(device)
 
             proj_anchor, proj_positive, _ = model(inputs_anchor, inputs_positive, inputs_positive)
-
             srocc, plcc = calculate_srcc_plcc(proj_anchor, proj_positive)
             srocc_list.append(srocc)
             plcc_list.append(plcc)
@@ -742,9 +816,14 @@ if __name__ == "__main__":
 
     print("\nTraining Metrics:", format_metrics(train_metrics))
     print("Validation Metrics:", format_metrics(val_metrics))
-    print("Test Metrics:", format_metrics(test_metrics))
+    print("Test Metrics:", format_metrics(test_metrics)) 
+    
 
 
+
+# Training Metrics: {'srcc': [0.9148, 0.9213, 0.9216, 0.9358, 0.9602, 0.9618, 0.9677, 0.9679, 0.9654, 0.9666], 'plcc': [0.9161, 0.9228, 0.9234, 0.9367, 0.9605, 0.9623, 0.9681, 0.9685, 0.966, 0.9671]}      
+# Validation Metrics: {'srcc': [0.9032, 0.9292, 0.9245, 0.9377, 0.9628, 0.9665, 0.9694, 0.9709, 0.9698, 0.9679], 'plcc': [0.9031, 0.9311, 0.9265, 0.938, 0.9633, 0.9669, 0.9697, 0.9714, 0.9705, 0.9686]}
+# Test Metrics: {'srcc': [0.9201, 0.9285, 0.9261, 0.9435, 0.9615, 0.9619, 0.9675, 0.9681, 0.9679, 0.9652], 'plcc': [0.9207, 0.9298, 0.9279, 0.9441, 0.962, 0.9621, 0.968, 0.9686, 0.9685, 0.9659]}
 
 # TID2013
 

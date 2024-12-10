@@ -230,8 +230,11 @@ import torch
 import torch.nn as nn
 
 class DistortionAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads=8, dropout=0.1, num_layers=2):
+    def __init__(self, embed_dim, num_heads, dropout=0.1, num_layers=2):
         super(DistortionAttention, self).__init__()
+        if embed_dim % num_heads != 0:
+            num_heads = max(1, embed_dim // 8)  # num_heads를 적절히 재조정
+            print(f"[Warning] Adjusted num_heads to {num_heads} for embed_dim {embed_dim}.")
         self.layers = nn.ModuleList([
             nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, dropout=dropout)
             for _ in range(num_layers)
@@ -251,6 +254,9 @@ class DistortionAttention(nn.Module):
 class HardNegativeCrossAttention(nn.Module):
     def __init__(self, embed_dim, num_heads=8, dropout=0.1, num_layers=2):
         super(HardNegativeCrossAttention, self).__init__()
+        if embed_dim % num_heads != 0:
+            num_heads = max(1, embed_dim // 8)  # num_heads를 적절히 재조정
+            print(f"[Warning] Adjusted num_heads to {num_heads} for embed_dim {embed_dim}.")
         self.layers = nn.ModuleList([
             nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, dropout=dropout)
             for _ in range(num_layers)
@@ -259,7 +265,6 @@ class HardNegativeCrossAttention(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, high_res_features, low_res_features):
-        # [Batch, Embed] -> [Batch, Seq=1, Embed]
         high_res_features = high_res_features.unsqueeze(1)
         low_res_features = low_res_features.unsqueeze(1)
 
@@ -269,8 +274,8 @@ class HardNegativeCrossAttention(nn.Module):
             attn_output, _ = layer(attn_output, low_res_features, low_res_features)
             attn_output = self.dropout(attn_output)
 
-        # [Batch, Seq=1, Embed] -> [Batch, Embed]
         return attn_output.squeeze(1)
+
 
 
 """ 

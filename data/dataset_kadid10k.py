@@ -221,10 +221,8 @@ class KADID10KDataset(Dataset):
             transforms.ToTensor(),
         ])(image)
     
-    def apply_distortion(self, image: torch.Tensor) -> torch.Tensor:
-        """
-        Apply various distortions to the image
-        """
+    def apply_distortion(self, image: torch.Tensor, exclude: list = None) -> torch.Tensor:
+        exclude = exclude or []
         pil_image = transforms.ToPILImage()(image)
         distortions = [
             lambda img: img.filter(ImageFilter.GaussianBlur(radius=2)),  # Gaussian Blur
@@ -233,17 +231,20 @@ class KADID10KDataset(Dataset):
             lambda img: img.transpose(Image.FLIP_LEFT_RIGHT),  # Horizontal Flip
             lambda img: img.filter(ImageFilter.SHARPEN),  # Sharpen
         ]
-        # Randomly select a distortion
-        distortion = random.choice(distortions)
+        # 적용되지 말아야 할 왜곡 제외
+        available_distortions = [dist for i, dist in enumerate(distortions) if i not in exclude]
+        distortion = random.choice(available_distortions)
         distorted_image = distortion(pil_image)
         return transforms.ToTensor()(distorted_image)
+
 
     def __getitem__(self, index: int) -> dict:
         # Anchor 이미지로 distorted image 사용
         img_anchor = Image.open(self.images[index]).convert("RGB")
         img_positive = Image.open(self.ref_images[index]).convert("RGB")
         # Negative 이미지는 다른 index의 ref_images에서 선택
-        negative_index = (index + 1) % len(self.ref_images)  # 예를 들어, 다음 이미지로 선택
+        negative_index = random.choice([i for i in range(len(self.ref_images)) if i != index])
+        # 예를 들어, 다음 이미지로 선택
         img_negative = Image.open(self.ref_images[negative_index]).convert("RGB")
 
         img_anchor = self.transform(img_anchor)
@@ -254,7 +255,8 @@ class KADID10KDataset(Dataset):
         # Distortion 추가
         img_anchor = self.apply_distortion(img_anchor)
         img_positive = self.apply_distortion(img_positive)
-        img_negative = self.apply_distortion(img_negative)
+        img_negative = self.apply_distortion(img_negative, exclude=[0])  # 앵커와 다른 왜곡 적용
+
 
         return {
             "img_anchor": img_anchor,
